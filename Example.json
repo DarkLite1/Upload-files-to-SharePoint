@@ -1,0 +1,110 @@
+{
+  "MaxConcurrent": { "JobsTotal": 4, "JobsPerComputer": 2 },
+  "Tasks": [
+    {
+      "?": "Upload files, preserving subfolders. Keep the source files.",
+      "ComputerName": "localhost",
+      "Folders": [{ "Name": "Reports", "Path": "C:\\Exports\\Reports" }],
+      "Recurse": true,
+      "SharePoint": {
+        "SiteUrl": "https://contoso.sharepoint.com/sites/IT",
+        "DocumentLibraryName": "Documents",
+        "FolderPath": "Reports",
+        "ClientId": "ENV:AZURE_CLIENT_ID",
+        "TenantId": "ENV:AZURE_TENANT_ID",
+        "CertificateThumbprint": "ENV:AZURE_POWERSHELL_CERTIFICATE_THUMBPRINT",
+        "MaxRetries": 3,
+        "ChunkSizeMB": 5
+      },
+      "AfterUpload": { "RemoveFile": false, "CopyToFolder": null }
+    },
+    {
+      "?": "Upload from a share, archive each successful file, then remove the source.",
+      "ComputerName": null,
+      "Folders": ["\\\\contoso\\exports\\Invoices"],
+      "Recurse": false,
+      "SharePoint": {
+        "SiteUrl": "https://contoso.sharepoint.com/sites/Finance",
+        "DocumentLibraryName": "Documents",
+        "FolderPath": "Invoices",
+        "ClientId": "ENV:AZURE_CLIENT_ID",
+        "TenantId": "ENV:AZURE_TENANT_ID",
+        "CertificateThumbprint": "ENV:AZURE_POWERSHELL_CERTIFICATE_THUMBPRINT"
+      },
+      "AfterUpload": { "RemoveFile": true, "CopyToFolder": "\\\\contoso\\archive\\Invoices" }
+    }
+  ],
+  "PSSessionConfiguration": "PowerShell.7",
+  "Settings": {
+    "ScriptName": "Upload files to SharePoint",
+    "SendMail": {
+      "When": "Always",
+      "From": "no-reply-bnl-automation@example.com",
+      "FromDisplayName": "Upload files to SharePoint",
+      "To": ["bob@example.com"],
+      "Bcc": [],
+      "Subject": "",
+      "Body": "SharePoint file upload results.",
+      "Smtp": {
+        "ServerName": "SERVER1.EXAMPLE.COM",
+        "Port": 25,
+        "ConnectionType": "None",
+        "UserName": "",
+        "Password": ""
+      },
+      "AssemblyPath": {
+        "MailKit": "C:\\Program Files\\PackageManagement\\NuGet\\Packages\\MailKit.4.13.0\\lib\\net8.0\\MailKit.dll",
+        "MimeKit": "C:\\Program Files\\PackageManagement\\NuGet\\Packages\\MimeKit.4.13.0\\lib\\net8.0\\MimeKit.dll"
+      }
+    },
+    "SaveLogFiles": {
+      "Where": { "Folder": "C:\\Log\\Upload files to SharePoint" },
+      "DeleteLogsAfterDays": 30
+    },
+    "SaveInEventLog": { "Save": true, "LogName": "Scripts" }
+  },
+  "?": {
+    "MaxConcurrent": {
+      "JobsTotal": "Positive integer: maximum simultaneous folder jobs across all computers.",
+      "JobsPerComputer": "Positive integer: maximum simultaneous folder jobs per computer, or per file server for UNC sources. Files within a folder are uploaded sequentially."
+    },
+    "Tasks": {
+      "ComputerName": "Use localhost for local paths, a remote computer name for paths on that computer, or null for UNC paths processed by the script host.",
+      "Folders": "Nonempty array of absolute folder paths or objects with Name and Path. ENV: values are resolved on the script host. Overlapping source folders on the same computer are rejected.",
+      "Recurse": "Required Boolean. true preserves relative subfolders in SharePoint and in CopyToFolder; false uploads only files directly in the source. Hidden/system files are included; directory links are not followed.",
+      "SharePoint": {
+        "SiteUrl": "Required HTTPS site URL, not a library or sharing URL.",
+        "DocumentLibraryName": "Required library display name. Documents and Shared Documents are accepted aliases.",
+        "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name.",
+        "ClientId": "Required app registration client ID, or ENV:VARIABLE_NAME.",
+        "TenantId": "Required tenant ID, or ENV:VARIABLE_NAME.",
+        "CertificateThumbprint": "Required certificate thumbprint, or ENV:VARIABLE_NAME. Certificate/private key and credential environment variables must exist for the executing account on the worker computer. All tasks must use identical authentication settings.",
+        "MaxRetries": "Optional positive integer, default 3. Maximum attempts per Graph call, not per complete folder job.",
+        "ChunkSizeMB": "Optional integer 1-60, default 5. Large-file chunks are rounded down to a 320 KiB boundary."
+      },
+      "AfterUpload": {
+        "RemoveFile": "Optional Boolean, default false. Remove a source file only after confirmed upload and, when configured, successful copying.",
+        "CopyToFolder": "Optional absolute local or UNC folder; null/empty disables copying. ENV: values resolve on the script host. Must be outside every source folder on that computer. Missing archive folders are created. Existing archive files are never overwritten; a collision is reported and the source is kept. With RemoveFile false this copies and retains the source; with true it archives then removes it."
+      }
+    },
+    "PSSessionConfiguration": "Optional remote endpoint name, default PowerShell.7. No complete-job retries: retrying destructive post-upload actions may repeat uploads.",
+    "Settings": {
+      "ScriptName": "Required name used in reporting and log filenames.",
+      "SendMail": {
+        "When": "Never, Always, OnError, or OnErrorOrAction. Action means at least one confirmed upload, even if its post-upload action failed.",
+        "From": "Required unless Never. Supports ENV: values, as do FromDisplayName, SMTP fields and assembly paths.",
+        "To": "Recipient array. At least one To or Bcc recipient is required unless Never.",
+        "Bcc": "Optional BCC recipient array.",
+        "Subject": "Optional text appended to the generated uploaded/error count subject.",
+        "Body": "Optional trusted HTML displayed before the results table.",
+        "Smtp": "ServerName and Port required unless Never. Ports: 25, 465, 587, 2525. ConnectionType: None (default), Auto, SslOnConnect, StartTls, StartTlsWhenAvailable. Set both UserName and Password or neither.",
+        "AssemblyPath": "MailKit and MimeKit DLL paths required unless Never. Install MailKit/MimeKit and their dependencies on the script host."
+      },
+      "SaveLogFiles": {
+        "Where": { "Folder": "Optional log folder, supporting ENV:. Relative paths are relative to this script folder. Null/empty disables files. Saves JSON run details, Excel results when present, and HTML when sending mail." },
+        "DeleteLogsAfterDays": "Optional nonnegative whole number. 0/omitted retains logs forever. Positive values remove only this script/configuration's generated logs older than that many elapsed days, by LastWriteTime. Use a dedicated log folder outside all upload sources."
+      },
+      "SaveInEventLog": "Save is a required Boolean. LogName is required when enabled and supports ENV:. Provision the event source beforehand when the scheduled account cannot create it."
+    }
+  }
+}
