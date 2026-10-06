@@ -52,6 +52,53 @@ Describe 'Upload worker post-upload safety' {
         Test-Path -LiteralPath $sourcePath | Should -BeFalse
     }
 
+    It 'retains original metadata and completed actions after source removal' {
+        $original = Get-Item -LiteralPath $sourcePath
+        $creationTime = $original.CreationTime
+        $lastWriteTime = $original.LastWriteTime
+        $length = $original.Length
+        $task.AfterUpload.RemoveFile = $true
+        $task.AfterUpload.CopyToFolder = $archive
+        $result = & $worker $task $success
+        $result.FullName | Should -Be $sourcePath
+        $result.FileName | Should -Be 'report[1].txt'
+        $result.CreationTime | Should -Be $creationTime
+        $result.LastWriteTime | Should -Be $lastWriteTime
+        $result.Length | Should -Be $length
+        $result.DateTime | Should -BeOfType ([datetime])
+        $result.Action | Should -Be 'Uploaded, Copied, Removed'
+        Test-Path -LiteralPath $sourcePath | Should -BeFalse
+    }
+
+    It 'reports upload-stage diagnostics with file metadata on failure' {
+        $original = Get-Item -LiteralPath $sourcePath
+        $result = & $worker $task 'throw "Graph upload failed"'
+        $result.FullName | Should -Be $sourcePath
+        $result.CreationTime | Should -Be $original.CreationTime
+        $result.LastWriteTime | Should -Be $original.LastWriteTime
+        $result.Action | Should -BeNullOrEmpty
+        $result.Stage | Should -Be 'Upload file'
+        $result.Error | Should -Be 'Graph upload failed'
+        $result.ExceptionType | Should -Not -BeNullOrEmpty
+        $result.FullyQualifiedErrorId | Should -Not -BeNullOrEmpty
+        $result.ScriptStackTrace | Should -Not -BeNullOrEmpty
+    }
+
+    It 'continues after a file disappears before its metadata is read' {
+        $missing = [IO.FileInfo]::new((Join-Path $source.FullName 'missing.txt'))
+        $present = Get-Item -LiteralPath $sourcePath
+        Mock Get-ChildItem { $missing; $present }
+        $results = @(& $worker $task $success)
+        $results.Count | Should -Be 2
+        $failure = $results | Where-Object Error
+        $failure.FullName | Should -Be $missing.FullName
+        $failure.Stage | Should -Be 'Read file'
+        $failure.Error | Should -BeLike '*no longer accessible*'
+        $failure.CreationTime | Should -BeNullOrEmpty
+        $failure.LastWriteTime | Should -BeNullOrEmpty
+        @($results | Where-Object Uploaded).Count | Should -Be 1
+    }
+
     It 'copies without removing when removal is disabled' {
         $task.AfterUpload.CopyToFolder = $archive
         $result = & $worker $task $success
@@ -67,6 +114,8 @@ Describe 'Upload worker post-upload safety' {
         $result = & $worker $task $success
         $result.Uploaded | Should -BeTrue
         $result.Error | Should -Not -BeNullOrEmpty
+        $result.Action | Should -Be 'Uploaded'
+        $result.Stage | Should -Be 'Copy file'
         $result.Removed | Should -BeFalse
         Test-Path -LiteralPath $sourcePath | Should -BeTrue
         Get-Content -LiteralPath (Join-Path $archive 'report[1].txt') | Should -Be 'older report'

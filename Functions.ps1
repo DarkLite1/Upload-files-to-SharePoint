@@ -752,7 +752,41 @@ function Send-UploadReportHC {
             }
             if ($Results.Count) {
                 $excelPath = "$baseLogName - Log.xlsx"
-                $Results | Export-Excel -Path $excelPath -WorksheetName 'Overview' -AutoSize -FreezeTopRow -BoldTopRow -ErrorAction Stop
+                $overviewColumns = @(
+                    'DateTime', 'ComputerName', 'TaskIndex', 'Type', 'Name', 'FileName', 'FullName',
+                    'CreationTime', 'LastWriteTime', 'Length', 'Action', 'Uploaded', 'CopiedTo', 'Removed',
+                    'Destination', 'WebUrl', 'Error', 'Stage', 'Source'
+                )
+                $errorColumns = @(
+                    'DateTime', 'ComputerName', 'TaskIndex', 'Type', 'Name', 'FullName', 'Action',
+                    'Destination', 'Error', 'Stage', 'TargetObject', 'FullyQualifiedErrorId',
+                    'ExceptionType', 'ScriptStackTrace', 'PositionMessage'
+                )
+                $excelParams = @{
+                    Path = $excelPath; AutoSize = $true; FreezeTopRow = $true; BoldTopRow = $true
+                    NoNumberConversion = '*'; ErrorAction = 'Stop'
+                }
+                $Results | Select-Object -Property $overviewColumns |
+                    Export-Excel @excelParams -WorksheetName 'Overview' -TableName 'Overview'
+                $fileErrors = @($Results | Where-Object Error)
+                if ($fileErrors.Count) {
+                    $fileErrors | Select-Object -Property $errorColumns |
+                        Export-Excel @excelParams -WorksheetName 'Errors' -TableName 'Errors'
+                }
+                else {
+                    $package = Open-ExcelPackage -Path $excelPath -ErrorAction Stop
+                    try {
+                        $worksheet = Add-Worksheet -ExcelPackage $package -WorksheetName 'Errors'
+                        for ($columnIndex = 0; $columnIndex -lt $errorColumns.Count; $columnIndex++) {
+                            $worksheet.Cells[1, ($columnIndex + 1)].Value = $errorColumns[$columnIndex]
+                        }
+                        $worksheet.Cells[1, 1, 1, $errorColumns.Count].Style.Font.Bold = $true
+                        $worksheet.View.FreezePanes(2, 1)
+                        $worksheet.Cells.AutoFitColumns()
+                        $package.Save()
+                    }
+                    finally { if ($package) { $package.Dispose() } }
+                }
                 $attachments += $excelPath
             }
         }

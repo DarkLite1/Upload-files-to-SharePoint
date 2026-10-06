@@ -285,12 +285,23 @@ Describe 'Upload configuration and orchestration' {
 
     It 'reports remote-session creation failure without retrying the whole job' {
         $config.Tasks[0].ComputerName = 'SERVER1'
+        $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
         Mock New-PSSession { throw 'Access denied' }
         Mock Invoke-Command {}
         Mock Remove-PSSession {}
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
         $result = & $main $configPath
         $result.Error | Should -Be 'Access denied'
+        $result.Stage | Should -Be 'Open remote session'
+        $excel = Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.xlsx'
+        $errorRow = Import-Excel -Path $excel.FullName -WorksheetName 'Errors'
+        $errorRow.FullName | Should -Be $source.FullName
+        $errorRow.Stage | Should -Be 'Open remote session'
+        $errorRow.Error | Should -Be 'Access denied'
+        $errorRow.ExceptionType | Should -Not -BeNullOrEmpty
+        $errorRow.FullyQualifiedErrorId | Should -Not -BeNullOrEmpty
+        $errorRow.ScriptStackTrace | Should -Not -BeNullOrEmpty
+        @(Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.json').Count | Should -Be 0
         Should -Invoke New-PSSession -Times 1
         Should -Invoke Invoke-Command -Times 0
         Should -Invoke Remove-PSSession -Times 0
@@ -448,6 +459,16 @@ Describe 'Upload reporting' {
         @($files | Where-Object Extension -eq '.json').Count | Should -Be 0
         $excel = $files | Where-Object Extension -eq '.xlsx'
         (Import-Excel $excel.FullName).Source | Should -Be $row.Source
+        $package = Open-ExcelPackage -Path $excel.FullName
+        try {
+            $package.Workbook.Worksheets.Name | Should -Contain 'Overview'
+            $package.Workbook.Worksheets.Name | Should -Contain 'Errors'
+            $errorSheet = $package.Workbook.Worksheets['Errors']
+            $errorSheet.Dimension.End.Row | Should -Be 1
+            $errorSheet.Cells[1, 9].Value | Should -Be 'Error'
+            $errorSheet.Cells[1, 10].Value | Should -Be 'Stage'
+        }
+        finally { $package.Dispose() }
         $html = $files | Where-Object Extension -eq '.html'
         $script:expectedHtml = Get-Content $html.FullName -Raw
         Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter { $Body.TrimEnd() -eq $script:expectedHtml.TrimEnd() -and $Attachments.Count -eq 1 }
@@ -505,6 +526,11 @@ Describe 'Upload reporting' {
         @($logged | Where-Object Error).Count | Should -Be 2
         ($logged | Where-Object Source -eq $conflict.Source).Error | Should -Be $conflict.Error
         ($logged | Where-Object Source -eq $copyError.Source).Error | Should -Be $copyError.Error
+        $errorRows = @(Import-Excel -Path $excel.FullName -WorksheetName 'Errors')
+        $errorRows.Count | Should -Be 2
+        $errorRows.Error | Should -Contain $conflict.Error
+        $errorRows.Error | Should -Contain $copyError.Error
+        $errorRows.Error | Should -Not -Contain 'Configuration failure'
         $json = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '* - System errors log.json'
         $text = Get-Content $json.FullName -Raw
         $errors = @($text | ConvertFrom-Json)
@@ -512,6 +538,51 @@ Describe 'Upload reporting' {
         $errors[0].Message | Should -Be 'Configuration failure'
         $errors[0].DateTime | Should -Not -BeNullOrEmpty
         $text | Should -Not -Match 'Source|Uploaded|Destination|Archive already exists'
+    }
+
+    It 'exports real file dates, paths, size and actions after the source has been removed' {
+        $sourceFolder = New-Item -ItemType Directory (Join-Path $TestDrive ([guid]::NewGuid()))
+        $path = Join-Path $sourceFolder '000123.txt'
+        Set-Content -LiteralPath $path -Value 'report'
+        $sourceFile = Get-Item -LiteralPath $path
+        $sourceFile.CreationTime = [datetime]'2024-01-02T03:04:05'
+        $sourceFile.LastWriteTime = [datetime]'2025-02-03T04:05:06'
+        $creationTime = $sourceFile.CreationTime
+        $lastWriteTime = $sourceFile.LastWriteTime
+        $length = $sourceFile.Length
+        $config = Get-Content "$scriptRoot\Example.json" -Raw | ConvertFrom-Json
+        $task = [pscustomobject]@{
+            TaskIndex = 0; ComputerName = 'localhost'; Name = '000123'; Path = $sourceFolder.FullName
+            Recurse = $false; SharePoint = $config.Tasks[0].SharePoint
+            AfterUpload = [pscustomobject]@{ RemoveFile = $true; CopyToFolder = (Join-Path $TestDrive ([guid]::NewGuid())) }
+        }
+        $results = @(& "$scriptRoot\Upload files.ps1" $task '[pscustomobject]@{ Id="uploaded"; WebUrl="https://example.com/report" }')
+        Test-Path -LiteralPath $path | Should -BeFalse
+        $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $settings.SendMail.When = 'Never'
+        Send-UploadReportHC $settings $results $systemErrors (Get-Date) 'Test'
+        $systemErrors.Count | Should -Be 0
+        $excel = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx'
+        $overview = Import-Excel -Path $excel.FullName -WorksheetName 'Overview'
+        $overview.FullName | Should -Be $path
+        $overview.FileName | Should -Be '000123.txt'
+        $overview.Name | Should -Be '000123'
+        $overview.CreationTime | Should -Be $creationTime
+        $overview.LastWriteTime | Should -Be $lastWriteTime
+        $overview.Length | Should -Be $length
+        $overview.Action | Should -Be 'Uploaded, Copied, Removed'
+        $overview.DateTime | Should -BeOfType ([datetime])
+        $package = Open-ExcelPackage -Path $excel.FullName
+        try {
+            $sheet = $package.Workbook.Worksheets['Overview']
+            $sheet.Cells[1, 7].Value | Should -Be 'FullName'
+            $sheet.Cells[1, 8].Value | Should -Be 'CreationTime'
+            $sheet.Cells[1, 9].Value | Should -Be 'LastWriteTime'
+            $sheet.Cells[1, 11].Value | Should -Be 'Action'
+            $sheet.Cells[2, 8].Style.Numberformat.Format | Should -Not -Be 'General'
+            $sheet.Cells[2, 9].Style.Numberformat.Format | Should -Not -Be 'General'
+        }
+        finally { $package.Dispose() }
     }
 
     It 'does not create JSON for file errors without system errors' {

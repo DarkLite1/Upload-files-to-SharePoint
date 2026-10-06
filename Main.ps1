@@ -48,18 +48,31 @@ try {
             $session = $null
             try {
                 if ($task.ComputerName -eq $env:COMPUTERNAME) {
+                    $stage = 'Run local worker'
                     & $WorkerPath -Task $task -UploadScript $UploadScript
                 }
                 else {
+                    $stage = 'Open remote session'
                     $session = New-PSSession -ComputerName $task.ComputerName -ConfigurationName $SessionConfiguration -ErrorAction Stop
+                    $stage = 'Run remote worker'
                     Invoke-Command -Session $session -FilePath $WorkerPath -ArgumentList $task, $UploadScript -ErrorAction Stop
                 }
             }
             catch {
+                $exception = if ($_.Exception.SerializedRemoteException) { $_.Exception.SerializedRemoteException } else { $_.Exception }
+                $positionMessage = if ($_.Exception.SerializedRemoteInvocationInfo.PositionMessage) {
+                    $_.Exception.SerializedRemoteInvocationInfo.PositionMessage
+                }
+                else { $_.InvocationInfo.PositionMessage }
                 [pscustomobject]@{
                     TaskIndex = $task.TaskIndex; ComputerName = $task.ComputerName; Name = $task.Name
+                    DateTime = Get-Date; FullName = $task.Path; FileName = ''; Type = 'Task'
+                    CreationTime = $null; LastWriteTime = $null; Length = $null; Action = ''
                     Source = $task.Path; Destination = ''; WebUrl = ''; Uploaded = $false; CopiedTo = ''; Removed = $false
                     Error = "$($_.Exception.Message)"
+                    Stage = $stage; TargetObject = "$($_.TargetObject)"; FullyQualifiedErrorId = $_.FullyQualifiedErrorId
+                    ExceptionType = $exception.PSTypeNames[0] -replace '^Deserialized\.', ''
+                    ScriptStackTrace = $_.ScriptStackTrace; PositionMessage = $positionMessage
                 }
             }
             finally {

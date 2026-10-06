@@ -85,8 +85,14 @@ $files = @(
 foreach ($failure in $enumerationErrors) {
     [PSCustomObject]@{
         TaskIndex = $Task.TaskIndex; ComputerName = $Task.ComputerName; Name = $Task.Name
+        DateTime = Get-Date; FullName = "$($failure.TargetObject)"; FileName = ''; Type = 'Folder'
+        CreationTime = $null; LastWriteTime = $null; Length = $null; Action = ''
         Source = "$($failure.TargetObject)"; Destination = ''; WebUrl = ''
         Uploaded = $false; CopiedTo = ''; Removed = $false; Error = "$failure"
+        Stage = 'Read folder'; TargetObject = "$($failure.TargetObject)"
+        FullyQualifiedErrorId = $failure.FullyQualifiedErrorId
+        ExceptionType = $failure.Exception.GetType().FullName
+        ScriptStackTrace = $failure.ScriptStackTrace; PositionMessage = $failure.InvocationInfo.PositionMessage
     }
 }
 
@@ -94,14 +100,21 @@ foreach ($sourceFile in $files) {
     if ($excludedFiles.Contains($sourceFile.FullName)) { continue }
     $result = [PSCustomObject]@{
         TaskIndex = $Task.TaskIndex; ComputerName = $Task.ComputerName; Name = $Task.Name
+        DateTime = Get-Date; FullName = $sourceFile.FullName; FileName = $sourceFile.Name; Type = 'File'
+        CreationTime = $null; LastWriteTime = $null; Length = $null; Action = ''
         Source = $sourceFile.FullName; Destination = ''; WebUrl = ''
         Uploaded = $false; CopiedTo = ''; Removed = $false; Error = ''
+        Stage = 'Read file'; TargetObject = ''; FullyQualifiedErrorId = ''; ExceptionType = ''
+        ScriptStackTrace = ''; PositionMessage = ''
     }
     $sourceLock = $null
     try {
         $sourceFile.Refresh()
         if (-not $sourceFile.Exists) { throw "Source file '$($sourceFile.FullName)' is no longer accessible." }
         if ($sourceFile.Attributes -band $excludedAttributeMask) { continue }
+        $result.CreationTime = $sourceFile.CreationTime
+        $result.LastWriteTime = $sourceFile.LastWriteTime
+        $result.Length = $sourceFile.Length
         if ($sourceFile.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Symbolic links and other reparse-point files are not uploaded.'
         }
@@ -124,17 +137,21 @@ foreach ($sourceFile in $files) {
             if ($null -ne $Task.SharePoint.$property) { $uploadParams[$property] = $Task.SharePoint.$property }
         }
         $sourceLock = [IO.File]::Open($sourceFile.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $result.Stage = 'Upload file'
         $uploaded = & $uploader @uploadParams
         if (-not $uploaded.Id) { throw 'Upload did not return a confirmed SharePoint item ID.' }
         $result.Uploaded = $true
+        $result.Action = 'Uploaded'
         $result.WebUrl = $uploaded.WebUrl
         $sourceFile.Refresh()
         $isExcluded = [bool]($sourceFile.Attributes -band $excludedAttributeMask)
         if ($copyRoot -and -not $isExcluded) {
+            $result.Stage = 'Copy file'
             $copyPath = Join-Path $copyRoot $relativePath
             $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($copyPath))
             [IO.File]::Copy($sourceFile.FullName, $copyPath, $false)
             $result.CopiedTo = $copyPath
+            $result.Action += ', Copied'
         }
         $sourceFile.Refresh()
         $uploadedLength = $sourceFile.Length
@@ -142,6 +159,7 @@ foreach ($sourceFile in $files) {
         $sourceLock.Dispose()
         $sourceLock = $null
         if ($Task.AfterUpload.RemoveFile -and -not $isExcluded) {
+            $result.Stage = 'Remove file'
             $sourceFile.Refresh()
             if (-not $sourceFile.Exists -or $sourceFile.Length -ne $uploadedLength -or $sourceFile.LastWriteTimeUtc -ne $uploadedWriteTime) {
                 throw 'Source changed after upload; it was not removed.'
@@ -149,10 +167,18 @@ foreach ($sourceFile in $files) {
             if (-not ($sourceFile.Attributes -band $excludedAttributeMask)) {
                 Remove-Item -LiteralPath $sourceFile.FullName -Force
                 $result.Removed = $true
+                $result.Action += ', Removed'
             }
         }
     }
-    catch { $result.Error = "$($_.Exception.Message)" }
+    catch {
+        $result.Error = "$($_.Exception.Message)"
+        $result.TargetObject = "$($_.TargetObject)"
+        $result.FullyQualifiedErrorId = $_.FullyQualifiedErrorId
+        $result.ExceptionType = $_.Exception.GetType().FullName
+        $result.ScriptStackTrace = $_.ScriptStackTrace
+        $result.PositionMessage = $_.InvocationInfo.PositionMessage
+    }
     finally { if ($sourceLock) { $sourceLock.Dispose() } }
     $result
 }
