@@ -596,8 +596,22 @@ function ConvertTo-UploadConfigurationHC {
         $task = $Configuration.Tasks[$taskIndex]
         $prefix = "Tasks[$taskIndex]"
         foreach ($property in $task.PSObject.Properties.Name) {
-            if ($property -notin '?', 'ComputerName', 'Folders', 'Recurse', 'Exclude', 'SharePoint', 'AfterUpload') { throw "Unsupported property '$prefix.$property'." }
+            if ($property -notin '?', 'ComputerName', 'Upload', 'Recurse', 'Exclude', 'SharePoint', 'AfterUpload') { throw "Unsupported property '$prefix.$property'." }
         }
+        if ($task.Upload -isnot [pscustomobject]) { throw "$prefix.Upload must be an object with Folders and/or Files arrays." }
+        foreach ($property in $task.Upload.PSObject.Properties.Name) {
+            if ($property -notin '?', 'Folders', 'Files') { throw "Unsupported property '$prefix.Upload.$property'." }
+        }
+        $selections = @(
+            foreach ($property in 'Folders', 'Files') {
+                if ($task.Upload.PSObject.Properties.Name -notcontains $property) { continue }
+                if ($task.Upload.$property -isnot [array]) { throw "$prefix.Upload.$property must be an array." }
+                foreach ($entry in $task.Upload.$property) {
+                    [pscustomobject]@{ Kind = $property; Entry = $entry }
+                }
+            }
+        )
+        if (-not $selections.Count) { throw "$prefix.Upload must select at least one folder or file." }
         $excludeAttributes = @()
         $excludedPaths = @{ Folders = @(); Files = @() }
         if ($task.PSObject.Properties.Name -contains 'Exclude') {
@@ -631,8 +645,9 @@ function ConvertTo-UploadConfigurationHC {
                 )
             }
         }
-        if ($task.Folders -isnot [array] -or $task.Folders.Count -eq 0) { throw "$prefix.Folders must be a nonempty array." }
-        if ($task.Recurse -isnot [bool]) { throw "$prefix.Recurse must be true or false." }
+        if (($task.Upload.Folders.Count -gt 0 -or $task.PSObject.Properties.Name -contains 'Recurse') -and $task.Recurse -isnot [bool]) {
+            throw "$prefix.Recurse must be true or false; it is required when Upload.Folders is nonempty."
+        }
         if ($task.SharePoint -isnot [pscustomobject]) { throw "$prefix.SharePoint is required." }
         foreach ($property in $task.SharePoint.PSObject.Properties.Name) {
             if ($property -notin '?', 'SiteUrl', 'DocumentLibraryName', 'FolderPath', 'ClientId', 'TenantId', 'CertificateThumbprint', 'MaxRetries', 'ChunkSizeMB', 'Overwrite') { throw "Unsupported property '$prefix.SharePoint.$property'." }
@@ -671,12 +686,27 @@ function ConvertTo-UploadConfigurationHC {
         if ($copyFolder -and $copyFolder -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') { throw "$prefix.AfterUpload.CopyToFolder must be an absolute local or UNC path." }
         if ($copyFolder) { $copyFolder = [IO.Path]::GetFullPath($copyFolder).TrimEnd('\') }
         $folderPaths = @()
-        foreach ($folder in $task.Folders) {
-            if ($folder -is [string]) { $path = $folder; $name = '' }
-            elseif ($folder -is [pscustomobject] -and $folder.Path -is [string]) { $path = $folder.Path; $name = $folder.Name }
-            else { throw "$prefix.Folders entries must be strings or objects with Path and optional Name." }
+        $filePaths = @()
+        foreach ($selection in $selections) {
+            $entry = $selection.Entry
+            $sourceProperty = "$prefix.Upload.$($selection.Kind)"
+            $uploadType = if ($selection.Kind -eq 'Files') { 'File' } else { 'Folder' }
+            if ($entry -is [string]) { $path = $entry; $name = '' }
+            elseif ($entry -is [pscustomobject] -and $entry.Path -is [string]) {
+                foreach ($property in $entry.PSObject.Properties.Name) {
+                    if ($property -notin '?', 'Name', 'Path') { throw "Unsupported property '$sourceProperty.$property'." }
+                }
+                if ($entry.PSObject.Properties.Name -contains 'Name' -and $entry.Name -isnot [string]) {
+                    throw "$sourceProperty entry Name must be a string."
+                }
+                $path = $entry.Path; $name = $entry.Name
+            }
+            else { throw "$sourceProperty entries must be strings or objects with Path and optional Name." }
+            if ([string]::IsNullOrWhiteSpace($path)) { throw "$sourceProperty requires nonempty paths." }
             $path = (Get-StringValueHC $path).Replace('/', '\')
-            if ($path -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') { throw "$prefix.Folders requires absolute local or UNC paths." }
+            if ($path -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)' -or $path -match '[*?]') {
+                throw "$sourceProperty requires absolute local or UNC paths without wildcards."
+            }
             $path = [IO.Path]::GetFullPath($path)
             $computer = $task.ComputerName
             if ($computer -and $computer -isnot [string]) { throw "$prefix.ComputerName must be a string or null." }
@@ -685,17 +715,19 @@ function ConvertTo-UploadConfigurationHC {
             if (-not $computer -or $computer -in 'localhost', '.', $env:COMPUTERNAME) { $computer = $env:COMPUTERNAME }
             if ($isUnc -and $computer -ne $env:COMPUTERNAME) { throw "${prefix}: use ComputerName null for UNC paths to avoid a remoting double hop." }
             $target = if ($isUnc) { ($path -split '\\')[2] } else { $computer }
-            $folderPaths += $path.TrimEnd('\')
+                if ($uploadType -eq 'Folder') { $folderPaths += $path.TrimEnd('\') }
+                else { $filePaths += $path }
             $pathPrefix = "$($path.TrimEnd('\'))\"
             $pathExclusions = @{ Attributes = $excludeAttributes }
             foreach ($property in 'Folders', 'Files') {
                 $pathExclusions[$property] = @($excludedPaths[$property] | Where-Object {
-                        $_.StartsWith($pathPrefix, [StringComparison]::OrdinalIgnoreCase)
+                    if ($uploadType -eq 'Folder') { $_.StartsWith($pathPrefix, [StringComparison]::OrdinalIgnoreCase) }
+                    else { $property -eq 'Files' -and $_ -eq $path }
                     })
             }
             $prepared.Add([pscustomobject]@{
                     TaskIndex = $taskIndex; ComputerName = $computer; Target = $target; Name = $name
-                    Path = $path; Recurse = $task.Recurse; SharePoint = $task.SharePoint
+                    Path = $path; UploadType = $uploadType; Recurse = [bool]($uploadType -eq 'Folder' -and $task.Recurse); SharePoint = $task.SharePoint
                     Exclude = [pscustomobject]$pathExclusions
                     AfterUpload = [pscustomobject]@{ RemoveFile = [bool]$after.RemoveFile; CopyToFolder = $copyFolder }
                 })
@@ -705,8 +737,8 @@ function ConvertTo-UploadConfigurationHC {
                 $matchingRoots = @($folderPaths | Where-Object {
                         $excludedPath.StartsWith("$_\", [StringComparison]::OrdinalIgnoreCase)
                     })
-                if (-not $matchingRoots) {
-                    throw "$prefix.Exclude.$property path '$excludedPath' must be below a source folder in this task."
+                if (-not $matchingRoots -and -not ($property -eq 'Files' -and $excludedPath -in $filePaths)) {
+                    throw "$prefix.Exclude.$property path '$excludedPath' must be below an Upload.Folders source, or for Exclude.Files match an Upload.Files source in this task."
                 }
             }
         }
@@ -716,11 +748,13 @@ function ConvertTo-UploadConfigurationHC {
             if ($task.ComputerName -ne $other.ComputerName) { continue }
             $source = $other.Path.TrimEnd('\')
             $copy = $task.AfterUpload.CopyToFolder
-            if ($copy -and ($copy -eq $source -or $copy.StartsWith("$source\", [StringComparison]::OrdinalIgnoreCase))) {
-                throw 'AfterUpload.CopyToFolder must be outside every source folder on the same computer.'
+            if ($copy -and ($copy -eq $source -or $copy.StartsWith("$source\", [StringComparison]::OrdinalIgnoreCase) -or
+                ($other.UploadType -eq 'File' -and $source.StartsWith("$copy\", [StringComparison]::OrdinalIgnoreCase)))) {
+                throw 'AfterUpload.CopyToFolder must be outside every source folder and must not contain a selected source file on the same computer.'
             }
-            if (-not [object]::ReferenceEquals($task, $other) -and ($task.Path.TrimEnd('\') -eq $source -or $task.Path.StartsWith("$source\", [StringComparison]::OrdinalIgnoreCase))) {
-                throw 'Source folders must not overlap on the same computer.'
+            if (-not [object]::ReferenceEquals($task, $other) -and ($task.Path.TrimEnd('\') -eq $source -or
+                ($other.UploadType -eq 'Folder' -and $task.Path.StartsWith("$source\", [StringComparison]::OrdinalIgnoreCase)))) {
+                throw 'Source paths must not overlap on the same computer, including duplicate files or files inside selected folders.'
             }
         }
     }

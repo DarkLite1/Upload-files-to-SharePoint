@@ -4,7 +4,10 @@
     {
       "?": "Upload files, preserving subfolders. Keep the source files.",
       "ComputerName": "localhost",
-      "Folders": [{ "Name": "Reports", "Path": "C:\\Exports\\Reports" }],
+      "Upload": {
+        "Folders": [{ "Name": "Reports", "Path": "C:\\Exports\\Reports" }],
+        "Files": []
+      },
       "Recurse": true,
       "Exclude": {
         "Attributes": ["Hidden", "System"],
@@ -28,9 +31,12 @@
       }
     },
     {
-      "?": "Upload from a share, archive each successful file, then remove the source.",
+      "?": "Upload a selected file from a share, archive it after success, then remove the source.",
       "ComputerName": null,
-      "Folders": ["\\\\contoso\\exports\\Invoices"],
+      "Upload": {
+        "Folders": [],
+        "Files": ["\\\\contoso\\exports\\Invoices\\invoice.csv"]
+      },
       "Recurse": false,
       "SharePoint": {
         "SiteUrl": "https://contoso.sharepoint.com/sites/Finance",
@@ -78,33 +84,37 @@
   },
   "?": {
     "MaxConcurrent": {
-      "JobsTotal": "Positive integer: maximum simultaneous folder jobs across all computers.",
-      "JobsPerComputer": "Positive integer: maximum simultaneous folder jobs per computer, or per file server for UNC sources. Files within a folder are uploaded sequentially."
+      "JobsTotal": "Positive integer: maximum simultaneous source jobs across all computers. Each selected folder or explicit file is one job.",
+      "JobsPerComputer": "Positive integer: maximum simultaneous source jobs per computer, or per file server for UNC sources. Files within a folder are uploaded sequentially."
     },
     "Tasks": {
       "ComputerName": "Use localhost for local paths, a remote computer name for paths on that computer, or null for UNC paths processed by the script host.",
-      "Folders": "Nonempty array of absolute folder paths or objects with Name and Path. ENV: values are resolved on the script host. Overlapping source folders on the same computer are rejected.",
-      "Recurse": "Required Boolean. true preserves relative subfolders in SharePoint and in CopyToFolder; false uploads only files directly in the source. Hidden/system files are included unless excluded; directory links are not followed.",
+      "Upload": {
+        "?": "Required object. Select at least one source across Folders and Files. Either list may be omitted or empty; null and scalar lists are invalid. Both lists accept absolute local or UNC paths, or objects with Path and optional string Name for reporting. Paths are literal; wildcards are not supported. ENV: values resolve on the script host. Duplicate and overlapping sources on the same computer are rejected, including explicit files inside selected folders.",
+        "Folders": "Upload the contents of these folders. Recurse controls subfolder traversal and relative paths. Each selected folder is one job.",
+        "Files": "Upload only these specific files, without enumerating their parent folders. Each file is one job and uses its filename directly inside SharePoint.FolderPath and CopyToFolder. Name is a report label, not a destination filename."
+      },
+      "Recurse": "Boolean required when Upload.Folders is nonempty; optional for file-only tasks. Applies only to Upload.Folders. true preserves relative subfolders in SharePoint and in CopyToFolder; false uploads only files directly in each selected folder. Hidden/system files are included unless excluded; directory links are not followed.",
       "Exclude": {
         "?": "Optional exclusions for this task. Omit unused properties or use empty arrays. An empty object means no exclusions. Excluded files are not uploaded, copied, or removed. Excluded folder trees are not entered. Excluded items are not errors or upload results; genuine access errors are still reported.",
-        "Attributes": "Optional array containing Hidden, System, both, or neither. Items matching ANY listed attribute are excluded. Applies to files and folders, including source roots. Defaults to [] when omitted.",
-        "Folders": "Optional array of absolute folder paths to skip, including all their contents. Each path must be a subfolder of a source in this task's Folders. Paths are literal, case-insensitive and normalized; wildcards are not supported. Supports ENV: values resolved on the script host.",
-        "Files": "Optional array of absolute file paths to skip. Each path must be below a source in this task's Folders. Paths are literal, case-insensitive and normalized; wildcards are not supported. Supports ENV: values resolved on the script host."
+        "Attributes": "Optional array containing Hidden, System, both, or neither. Items matching ANY listed attribute are excluded. Folder selections check files and folders, including source roots; explicit file selections check the selected file's own attributes. Defaults to [] when omitted.",
+        "Folders": "Optional array of absolute folder paths to skip, including all their contents. Each path must be a subfolder of a source in this task's Upload.Folders. Paths are literal, case-insensitive and normalized; wildcards are not supported. Supports ENV: values resolved on the script host.",
+        "Files": "Optional array of absolute file paths to skip. Each path must be below a source in this task's Upload.Folders or match one of its Upload.Files selections. Paths are literal, case-insensitive and normalized; wildcards are not supported. Supports ENV: values resolved on the script host."
       },
       "SharePoint": {
         "SiteUrl": "Required HTTPS site URL, not a library or sharing URL.",
         "DocumentLibraryName": "Required library display name. Documents and Shared Documents are accepted aliases.",
-        "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name.",
+        "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name. Explicitly selected files go here by filename, without their local parent folder path.",
         "Overwrite": "Optional Boolean, default false. true replaces existing SharePoint files. false or omission reports an error if a destination file already exists, and leaves the source untouched. Applies to SharePoint only; existing archive files are never overwritten.",
         "ClientId": "Required app registration client ID, or ENV:VARIABLE_NAME.",
         "TenantId": "Required tenant ID, or ENV:VARIABLE_NAME.",
         "CertificateThumbprint": "Required certificate thumbprint, or ENV:VARIABLE_NAME. Certificate/private key and credential environment variables must exist for the executing account on the worker computer. All tasks must use identical authentication settings.",
-        "MaxRetries": "Optional positive integer, default 3. Maximum attempts per Graph call, not per complete folder job.",
+        "MaxRetries": "Optional positive integer, default 3. Maximum attempts per Graph call, not per complete source job.",
         "ChunkSizeMB": "Optional integer 1-60, default 5. Large-file chunks are rounded down to a 320 KiB boundary."
       },
       "AfterUpload": {
         "RemoveFile": "Optional Boolean, default false. Remove a source file only after confirmed upload and, when configured, successful copying.",
-        "CopyToFolder": "Optional absolute local or UNC folder; null/empty disables copying. ENV: values resolve on the script host. Must be outside every source folder on that computer. Missing archive folders are created. Existing archive files are never overwritten; a collision is reported and the source is kept. With RemoveFile false this copies and retains the source; with true it archives then removes it."
+        "CopyToFolder": "Optional absolute local or UNC folder; null/empty disables copying. ENV: values resolve on the script host. Must be outside every selected source folder and must not contain any explicitly selected source file on that computer. Folder selections preserve relative paths; explicit files are copied by filename. Missing archive folders are created. Existing archive files are never overwritten; a collision is reported and the source is kept. With RemoveFile false this copies and retains the source; with true it archives then removes it."
       }
     },
     "PSSessionConfiguration": "Optional remote endpoint name, default PowerShell.7. No complete-job retries: retrying destructive post-upload actions may repeat uploads.",

@@ -25,6 +25,63 @@ Describe 'Upload worker post-upload safety' {
         Test-Path -LiteralPath $sourcePath | Should -BeTrue
     }
 
+    It 'uploads only the selected literal file without enumerating its folder' {
+        Set-Content -LiteralPath (Join-Path $source 'report1.txt') -Value 'not selected'
+        $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
+        $task.Path = $sourcePath
+        $task.Recurse = $true
+        Mock Get-ChildItem { throw 'File selections must not enumerate their parent folder' }
+        $results = @(& $worker $task $success)
+        $results.Count | Should -Be 1
+        $results[0].Error | Should -BeNullOrEmpty
+        $results[0].Uploaded | Should -BeTrue
+        $results[0].FullName | Should -Be $sourcePath
+        $results[0].Destination | Should -Be 'Reports/report[1].txt'
+        Should -Invoke Get-ChildItem -Times 0 -Exactly
+    }
+
+    It 'copies and removes a selected file while retaining its original metadata' {
+        $original = Get-Item -LiteralPath $sourcePath
+        $creationTime = $original.CreationTime
+        $lastWriteTime = $original.LastWriteTime
+        $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
+        $task.Path = $sourcePath
+        $task.AfterUpload.CopyToFolder = $archive
+        $task.AfterUpload.RemoveFile = $true
+        $result = & $worker $task $success
+        $result.Error | Should -BeNullOrEmpty
+        $result.CopiedTo | Should -Be (Join-Path $archive 'report[1].txt')
+        $result.Action | Should -Be 'Uploaded, Copied, Removed'
+        $result.CreationTime | Should -Be $creationTime
+        $result.LastWriteTime | Should -Be $lastWriteTime
+        Get-Content -LiteralPath $result.CopiedTo | Should -Be 'report'
+        Test-Path -LiteralPath $sourcePath | Should -BeFalse
+    }
+
+    It 'keeps a selected file after an upload failure' {
+        $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
+        $task.Path = $sourcePath
+        $task.AfterUpload.CopyToFolder = $archive
+        $task.AfterUpload.RemoveFile = $true
+        $result = & $worker $task 'throw "Upload failed"'
+        $result.Error | Should -Be 'Upload failed'
+        $result.Uploaded | Should -BeFalse
+        Test-Path -LiteralPath $sourcePath | Should -BeTrue
+        Test-Path -LiteralPath $archive | Should -BeFalse
+    }
+
+    It 'rejects a directory selected as a file' {
+        $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
+        { & $worker $task $success } | Should -Throw '*must be a file*'
+    }
+
+    It 'rejects copying a selected file onto itself' {
+        $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
+        $task.Path = $sourcePath
+        $task.AfterUpload.CopyToFolder = $source.FullName
+        { & $worker $task $success } | Should -Throw '*onto itself*'
+    }
+
     It 'does not copy or delete after a failed upload' {
         $task.AfterUpload.RemoveFile = $true
         $task.AfterUpload.CopyToFolder = $archive

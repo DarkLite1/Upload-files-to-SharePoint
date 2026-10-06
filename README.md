@@ -1,6 +1,6 @@
 # Upload Files to SharePoint
 
-Upload files from a Windows folder or network share to a SharePoint document library. After a successful upload, you can keep the source file, copy it to an archive, remove it, or archive it and then remove it.
+Upload selected files or the contents of Windows folders and network shares to a SharePoint document library. After a successful upload, you can keep the source file, copy it to an archive, remove it, or archive it and then remove it.
 
 ## 1. Install Requirements
 
@@ -53,9 +53,10 @@ For your first run, keep only the first example task and change:
 
 | Setting | What to enter |
 | --- | --- |
-| `Tasks[].ComputerName` | `localhost` for a local folder, or `null` for a network share. |
-| `Tasks[].Folders` | Your source folder paths. Entries can be strings or objects with `Name` and `Path`. |
-| `Tasks[].Recurse` | `true` to include subfolders, preserving their relative paths; otherwise `false`. |
+| `Tasks[].ComputerName` | `localhost` for local files/folders, or `null` for a network share. |
+| `Tasks[].Upload.Folders` | Folders whose contents should be uploaded. Entries can be path strings or objects with `Name` and `Path`. |
+| `Tasks[].Upload.Files` | Specific files to upload. Accepts the same entry format, without uploading other files from their parent folders. |
+| `Tasks[].Recurse` | Required for folder selections: `true` includes subfolders and preserves their relative paths; `false` selects only direct contents. Optional and unused for file-only tasks. |
 | `Tasks[].Exclude.Attributes` | Optional array: `["Hidden"]`, `["System"]`, or `["Hidden", "System"]` to skip those files and folder trees. Use `[]` or omit the setting to include them. |
 | `Tasks[].Exclude.Folders` | Optional array of absolute subfolder paths to skip with all their contents. |
 | `Tasks[].Exclude.Files` | Optional array of absolute file paths to skip. |
@@ -65,6 +66,19 @@ For your first run, keep only the first example task and change:
 | `Settings.SaveLogFiles.Where.Folder` | A dedicated log folder outside your source folders, or `null` to disable log files. |
 
 Replace the `ENV:...` authentication values with your actual IDs and thumbprint, or define the named environment variables for the account doing the uploads. Use identical authentication settings in all tasks.
+
+Use `Upload.Folders`, `Upload.Files`, or both in each task. For example:
+
+```json
+"Upload": {
+  "Folders": ["C:\\Exports\\Reports"],
+  "Files": [{ "Name": "Manifest", "Path": "C:\\Exports\\manifest.csv" }]
+}
+```
+
+Either list may be omitted or set to `[]`, but at least one source is required. Paths must be absolute local or UNC paths, without wildcards; `ENV:` paths resolve on the script host. `Name` is an optional report label, not a destination filename. The former top-level `Tasks[].Folders` setting is no longer accepted.
+
+Folder contents go into `SharePoint.FolderPath` without the selected root folder's name; `Recurse: true` preserves subfolders. Explicit files go directly into `SharePoint.FolderPath` by filename. Do not select the same file twice, overlapping folders, or explicit files inside selected folders, even when `Recurse` is false.
 
 Start with `Settings.SendMail.When` set to `Never`, `Settings.SaveInEventLog.Save` set to `false`, and these post-upload settings:
 
@@ -107,7 +121,7 @@ For example, to archive successful uploads and then remove their source files:
 }
 ```
 
-Failed uploads never trigger copying or removal. If copying fails, the source stays in place. Existing archive files are not overwritten; a name collision is reported as an error. Missing archive folders are created. Archive folders must be outside all source folders, and source folders must not overlap.
+Failed uploads never trigger copying or removal. If copying fails, the source stays in place. Existing archive files are not overwritten; a name collision is reported as an error. Missing archive folders are created. Archive folders must be outside all selected source folders and must not contain any explicitly selected source file on the same computer. Folder selections preserve relative paths in the archive; explicit files are copied directly into the archive by filename.
 
 ## Exclusions
 
@@ -121,9 +135,9 @@ Use separate lists for attributes, folder paths, and file paths. For a source fo
 }
 ```
 
-`Attributes` accepts `Hidden`, `System`, or both. Items matching either selected attribute are skipped; an attribute-excluded folder, including a source root, protects its entire contents.
+`Attributes` accepts `Hidden`, `System`, or both. Items matching either selected attribute are skipped. For folder selections, an attribute-excluded folder, including a source root, protects its entire contents. Explicit file selections check the selected file's own attributes.
 
-`Folders` excludes specific subfolder trees. `Files` excludes specific files. Each path must be below a source folder in the same task, using an absolute local or UNC path. Matching is case-insensitive and literal, not wildcard-based. `ENV:` values resolve on the computer running the command.
+`Exclude.Folders` excludes specific subfolder trees below an `Upload.Folders` source in the same task. `Exclude.Files` excludes specific files below an `Upload.Folders` source or matching an explicit `Upload.Files` selection. Use absolute local or UNC paths. Matching is case-insensitive and literal, not wildcard-based. `ENV:` values resolve on the computer running the command.
 
 Excluded files are never uploaded, copied, or removed. Excluded folders are not entered. Excluded items are not errors and do not appear as uploads in the reports. Access errors on non-excluded items are still reported.
 
@@ -137,9 +151,9 @@ All three lists are optional. Omit a list or set it to `[]` when unused; omit `E
 - **Email:** `Settings.SendMail.When` supports `Never`, `Always`, `OnError`, and `OnErrorOrAction`. To enable it, configure the sender, recipients, SMTP server, and `AssemblyPath` values. MailKit and MimeKit are .NET libraries, not PowerShell modules; compatible DLLs and their dependencies must be installed separately. Leave email disabled until these are available. The email HTML is also saved when file logging is enabled.
 - **Windows event log:** Set `Settings.SaveInEventLog.Save` to `true` and specify `LogName`. Ask an administrator to register the event source named by `Settings.ScriptName` if the execution account cannot create it.
 
-## Remote Folders
+## Remote Sources
 
-For a folder on another computer, set `ComputerName` to that computer's name and use a path local to it. That computer needs PowerShell 7, `Microsoft.Graph.Authentication`, and access to the certificate/private key. Install the module there using the command above under the executing account, or install it for all users.
+For a file or folder on another computer, set `ComputerName` to that computer's name and use a path local to it. That computer needs PowerShell 7, `Microsoft.Graph.Authentication`, and access to the certificate/private key. Install the module there using the command above under the executing account, or install it for all users.
 
 PowerShell remoting must be configured and accessible. `PSSessionConfiguration` defaults to `PowerShell.7`. Prefer an archive folder local to the remote computer; accessing a network archive from a remote session can require additional authentication setup.
 
@@ -149,6 +163,6 @@ For network shares, use `ComputerName: null` and UNC paths such as `\\server\sha
 
 - Existing SharePoint files cause an error unless `SharePoint.Overwrite` is `true`. On a conflict, the source is neither copied nor removed. Missing destination folders are created.
 - Source files you keep are attempted again on the next run. Existing destinations then cause errors unless you enable overwriting. Avoid matching destination filenames across tasks unless overwriting is intended.
-- Files must be finished writing before upload. Do not run overlapping instances against the same source folders.
+- Files must be finished writing before upload. Do not run overlapping instances against the same source files or folders.
 - Hidden and system files are included unless excluded with `Exclude.Attributes`. Folder links are not followed, and linked source folders or files are rejected. Empty folders are not uploaded; local folders are never removed.
-- `MaxConcurrent.JobsTotal` limits simultaneous folder jobs; `JobsPerComputer` limits them per computer or source file server. Files within each folder are processed one at a time.
+- Each selected folder or explicit file is one job. `MaxConcurrent.JobsTotal` limits simultaneous jobs; `JobsPerComputer` limits them per computer or source file server. Files within each selected folder are processed one at a time.

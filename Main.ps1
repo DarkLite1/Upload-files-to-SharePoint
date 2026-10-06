@@ -3,12 +3,13 @@
 
 <#
 .SYNOPSIS
-    Upload files from configured folders to SharePoint document libraries.
+    Upload selected files and folder contents to SharePoint document libraries.
 .DESCRIPTION
-    Uses the Tasks, MaxConcurrent, PSSessionConfiguration and Settings layout
-    used by the removal script. AfterUpload can copy and/or remove a source
+    Tasks select sources through Upload.Folders and Upload.Files.
+    AfterUpload can copy and/or remove a source
     file, only after its upload succeeds. With both enabled, copying must
-    succeed before removal. Relative subfolders are preserved when recursing.
+    succeed before removal. Folder jobs preserve relative subfolders when
+    recursing; explicitly selected files use their filename at the destination.
     Reports errors and exits with code 1 if any upload or reporting step fails.
 .PARAMETER ConfigurationJsonFile
     JSON configuration path, relative to the current working directory or absolute.

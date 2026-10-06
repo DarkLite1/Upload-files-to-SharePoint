@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Upload the files below one source folder and apply successful-upload actions.
+    Upload one selected file or a folder's files and apply successful-upload actions.
 .DESCRIPTION
     Internal worker used locally or through PowerShell remoting by Main.ps1.
     UploadScript contains the bundled single-file uploader, so remote computers
@@ -30,15 +30,26 @@ foreach ($path in $Task.Exclude.Folders) {
 foreach ($path in $Task.Exclude.Files) {
     $null = $excludedFiles.Add([IO.Path]::GetFullPath($path.Replace('/', '\')).TrimEnd('\'))
 }
+$isFile = $Task.UploadType -eq 'File'
+if ($isFile -and $excludedFiles.Contains($Task.Path)) { return }
 $root = Get-Item -LiteralPath $Task.Path -Force
-if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+if ($isFile) {
+    if ($root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Source '$($Task.Path)' must be a file, not a folder or link."
+    }
+}
+elseif (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw "Source '$($Task.Path)' must be a folder, not a link."
 }
 if ($root.Attributes -band $excludedAttributeMask) { return }
+$sourceFolder = if ($isFile) { $root.DirectoryName } else { $root.FullName }
 $rootPath = $root.FullName.TrimEnd('\', '/')
 $copyRoot = $Task.AfterUpload.CopyToFolder
 if ($copyRoot) {
     $copyRoot = [IO.Path]::GetFullPath($copyRoot).TrimEnd('\', '/')
+    if ($isFile -and (Join-Path $copyRoot $root.Name) -eq $root.FullName) {
+        throw 'CopyToFolder must not copy a source file onto itself.'
+    }
     if ($copyRoot -eq $rootPath -or $copyRoot.StartsWith("$rootPath\", [StringComparison]::OrdinalIgnoreCase)) {
         throw "CopyToFolder '$copyRoot' must be outside the source folder."
     }
@@ -46,7 +57,8 @@ if ($copyRoot) {
 
 $enumerationErrors = [Collections.Generic.List[object]]::new()
 $files = @(
-    if ($excludedAttributeMask -or $excludedFolders.Count) {
+    if ($isFile) { $root }
+    elseif ($excludedAttributeMask -or $excludedFolders.Count) {
         $pending = [Collections.Generic.Stack[string]]::new()
         $pending.Push($root.FullName)
         while ($pending.Count) {
@@ -118,7 +130,7 @@ foreach ($sourceFile in $files) {
         if ($sourceFile.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Symbolic links and other reparse-point files are not uploaded.'
         }
-        $relativePath = [IO.Path]::GetRelativePath($root.FullName, $sourceFile.FullName)
+        $relativePath = [IO.Path]::GetRelativePath($sourceFolder, $sourceFile.FullName)
         $relativeFolder = [IO.Path]::GetDirectoryName($relativePath)
         $targetFolder = (@($Task.SharePoint.FolderPath, $relativeFolder) | Where-Object { $_ }) -join '/'
         $targetFolder = $targetFolder.Replace('\', '/').Trim('/')
