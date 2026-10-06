@@ -4,23 +4,21 @@
 <#
     .SYNOPSIS
         Uploads a local file to a SharePoint Online document library,
-        overwriting the file when it is already present.
+        rejecting existing files unless overwriting is enabled.
 
     .DESCRIPTION
         Connects to Microsoft Graph with an Entra ID app registration using
         certificate based (app-only) authentication and uploads a single local
         file to a document library in a SharePoint Online site.
 
-        The upload always overwrites: when a file with the same name already
-        exists in the target folder its content is replaced (SharePoint keeps
-        the previous content as a version, so nothing is lost). Neither an
-        existing file nor a missing one raises an error.
+        Existing files cause an error by default. Set Overwrite to true to
+        replace their content. Version history depends on library settings.
 
         Two upload strategies are chosen automatically on file size:
-            - Up to 4 MB: a single PUT to the /content endpoint, which replaces
-              existing content by default.
+                        - Up to 4 MB: a single PUT to the /content endpoint with explicit
+                            conflict behavior in the query string.
             - Larger: a resumable upload session with conflictBehavior
-              'replace', uploaded in sequential chunks.
+              'fail' or 'replace', uploaded in sequential chunks.
 
         Missing folders in FolderPath are created before the upload, so the
         library does not need to be prepared by hand.
@@ -48,6 +46,9 @@
     .PARAMETER MaxRetries
         Maximum attempts per Graph call before giving up. (Default: 3)
 
+    .PARAMETER Overwrite
+        Whether to replace an existing SharePoint file. Defaults to false.
+
     .PARAMETER ChunkSizeMB
         Size in MB of a single chunk in a resumable upload session. Must be a
         multiple of 320 KiB, which every allowed value satisfies. Only used for
@@ -69,7 +70,7 @@
             -CertificateThumbprint 'ENV:AZURE_POWERSHELL_CERTIFICATE_THUMBPRINT'
 
         Uploads to 'Reports/Permission matrix' in the 'Documents' library,
-        creating the folder when absent and overwriting an existing file.
+        creating the folder when absent and rejecting an existing file.
         Credentials are resolved by the script from environment variables.
 
     .EXAMPLE
@@ -105,7 +106,8 @@ param (
     [ValidateRange(1, [int]::MaxValue)]
     [int]$MaxRetries = 3,
     [ValidateRange(1, 60)]
-    [int]$ChunkSizeMB = 5
+    [int]$ChunkSizeMB = 5,
+    [bool]$Overwrite = $false
 )
 
 begin {
@@ -616,15 +618,14 @@ begin {
     function Send-GraphFileHC {
         <#
         .SYNOPSIS
-            Upload a local file to a drive path, overwriting what is there.
+            Upload a local file using the selected conflict behavior.
 
         .DESCRIPTION
             Files up to 4 MB are sent in one PUT to the /content endpoint,
-            which replaces the content of an existing item by default and
-            creates the item when it is not there yet.
+            with explicit fail or replace conflict behavior in the URL.
 
             Larger files go through a resumable upload session created with
-            conflictBehavior 'replace'. The chunks are PUT to the session's
+            the same conflict behavior. The chunks are PUT to the session's
             pre-authenticated upload URL with Invoke-RestMethod instead of
             Invoke-MgGraphRequest, because that URL carries its own
             authorisation and must not be sent a bearer token.
@@ -636,11 +637,13 @@ begin {
             [Parameter(Mandatory)][string]$TargetPath,
             [Parameter(Mandatory)][string]$LocalFilePath,
             [Parameter(Mandatory)][int]$MaxRetries,
-            [Parameter(Mandatory)][int]$ChunkSizeMB
+            [Parameter(Mandatory)][int]$ChunkSizeMB,
+            [bool]$Overwrite = $false
         )
 
         $file = Get-Item -LiteralPath $LocalFilePath
         $encodedTargetPath = ConvertTo-GraphPathHC -Path $TargetPath
+        $conflictBehavior = if ($Overwrite) { 'replace' } else { 'fail' }
 
         $simpleUploadLimit = 4MB
 
@@ -648,7 +651,7 @@ begin {
             #region Single request upload
             Write-Verbose "Upload $([math]::Round($file.Length / 1KB, 1)) KB in a single request"
 
-            $uploadUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/root:/$($encodedTargetPath):/content"
+            $uploadUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/root:/$($encodedTargetPath):/content?@microsoft.graph.conflictBehavior=$conflictBehavior"
             $contentType = Get-ContentTypeHC -Path $LocalFilePath
 
             return Invoke-WithRetryHC -MaxRetries $MaxRetries -Description "upload file to '$TargetPath'" -Action {
@@ -671,7 +674,7 @@ begin {
 
         $sessionBody = @{
             'item' = @{
-                '@microsoft.graph.conflictBehavior' = 'replace'
+                '@microsoft.graph.conflictBehavior' = $conflictBehavior
             }
         }
 
@@ -867,7 +870,7 @@ process {
     }
     #endregion
 
-    #region Upload the file, overwriting an existing one
+    #region Upload the file
     $targetPath = if ($FolderPath) {
         '{0}/{1}' -f $FolderPath.Trim([char[]]('/', '\')), $FileName
     }
@@ -883,8 +886,17 @@ process {
         LocalFilePath = $FilePath
         MaxRetries    = $MaxRetries
         ChunkSizeMB   = $ChunkSizeMB
+        Overwrite     = $Overwrite
     }
-    $uploadedItem = Send-GraphFileHC @params
+    try {
+        $uploadedItem = Send-GraphFileHC @params
+    }
+    catch {
+        if (-not $Overwrite -and "$_" -match 'nameAlreadyExists') {
+            throw "SharePoint file '$targetPath' already exists and overwriting is disabled. $_"
+        }
+        throw
+    }
 
     Write-Verbose "Upload complete: '$($uploadedItem.webUrl)'"
     #endregion

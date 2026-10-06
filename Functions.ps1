@@ -602,7 +602,10 @@ function ConvertTo-UploadConfigurationHC {
         if ($task.Recurse -isnot [bool]) { throw "$prefix.Recurse must be true or false." }
         if ($task.SharePoint -isnot [pscustomobject]) { throw "$prefix.SharePoint is required." }
         foreach ($property in $task.SharePoint.PSObject.Properties.Name) {
-            if ($property -notin '?', 'SiteUrl', 'DocumentLibraryName', 'FolderPath', 'ClientId', 'TenantId', 'CertificateThumbprint', 'MaxRetries', 'ChunkSizeMB') { throw "Unsupported property '$prefix.SharePoint.$property'." }
+            if ($property -notin '?', 'SiteUrl', 'DocumentLibraryName', 'FolderPath', 'ClientId', 'TenantId', 'CertificateThumbprint', 'MaxRetries', 'ChunkSizeMB', 'Overwrite') { throw "Unsupported property '$prefix.SharePoint.$property'." }
+        }
+        if ($task.SharePoint.PSObject.Properties.Name -contains 'Overwrite' -and $task.SharePoint.Overwrite -isnot [bool]) {
+            throw "$prefix.SharePoint.Overwrite must be true or false."
         }
         foreach ($property in 'SiteUrl', 'DocumentLibraryName', 'ClientId', 'TenantId', 'CertificateThumbprint') {
             if ($task.SharePoint.$property -isnot [string] -or [string]::IsNullOrWhiteSpace($task.SharePoint.$property)) { throw "$prefix.SharePoint.$property is required." }
@@ -689,7 +692,7 @@ function Send-UploadReportHC {
                 $cutoff = (Get-Date).AddDays(-$days)
                 Get-ChildItem -LiteralPath $logFolder -File | Where-Object {
                     $_.Name -match '^\d{4}_\d{2}_\d{2}_\d{6}_\d{3} - ' -and
-                    $_.Name -match ' - (Log\.xlsx|Log\.json|Mail\.html)$' -and
+                    $_.Name -match ' - (Log\.xlsx|Log\.json|System errors log\.json|Mail\.html)$' -and
                     $_.Name.Contains(" - $($Settings.ScriptName) ($ConfigurationName) - ") -and
                     $_.LastWriteTime -lt $cutoff
                 } | Remove-Item -Force -ErrorAction Stop
@@ -746,12 +749,10 @@ function Send-UploadReportHC {
         }
         catch { $SystemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = "Failed writing event log: $_" }) }
     }
-    if ($baseLogName) {
+    if ($baseLogName -and $SystemErrors.Count) {
         try {
-            [pscustomobject]@{
-                Started = $Started; Finished = Get-Date; Uploaded = $uploadedCount
-                Errors = $itemErrorCount + $SystemErrors.Count; Results = @($Results); SystemErrors = $SystemErrors.ToArray()
-            } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath "$baseLogName - Log.json" -Encoding utf8 -ErrorAction Stop
+            ConvertTo-Json -InputObject $SystemErrors.ToArray() -Depth 5 |
+                Set-Content -LiteralPath "$baseLogName - System errors log.json" -Encoding utf8 -ErrorAction Stop
         }
         catch { $SystemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = "Failed saving JSON log: $_" }) }
     }

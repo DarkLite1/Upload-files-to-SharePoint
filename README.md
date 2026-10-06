@@ -57,6 +57,7 @@ For your first run, keep only the first example task and change:
 | `Tasks[].Folders` | Your source folder paths. Entries can be strings or objects with `Name` and `Path`. |
 | `Tasks[].Recurse` | `true` to include subfolders, preserving their relative paths; otherwise `false`. |
 | `Tasks[].SharePoint` | Your site URL, library name, optional destination `FolderPath`, client ID, tenant ID, and certificate thumbprint. |
+| `Tasks[].SharePoint.Overwrite` | `false` (default) reports an error if the destination file exists. Set to `true` only when you want to replace existing SharePoint files. |
 | `Settings.ScriptName` | A name for your reports and log files. |
 | `Settings.SaveLogFiles.Where.Folder` | A dedicated log folder outside your source folders, or `null` to disable log files. |
 
@@ -107,7 +108,7 @@ Failed uploads never trigger copying or removal. If copying fails, the source st
 
 ## Optional Reporting
 
-- **Log files:** `Settings.SaveLogFiles` controls the log folder and retention. Reports include JSON run details and Excel file results. `DeleteLogsAfterDays: 0` keeps logs indefinitely.
+- **Log files:** `Settings.SaveLogFiles` controls the log folder and retention. Excel records every file upload and file/task error, including conflicts and failed copying or removal. A separate `System errors log.json` contains only system errors, such as configuration or reporting failures, and is created only when those errors occur. File results are not duplicated in JSON. `DeleteLogsAfterDays: 0` keeps logs indefinitely.
 - **Email:** `Settings.SendMail.When` supports `Never`, `Always`, `OnError`, and `OnErrorOrAction`. To enable it, configure the sender, recipients, SMTP server, and `AssemblyPath` values. MailKit and MimeKit are .NET libraries, not PowerShell modules; compatible DLLs and their dependencies must be installed separately. Leave email disabled until these are available. The email HTML is also saved when file logging is enabled.
 - **Windows event log:** Set `Settings.SaveInEventLog.Save` to `true` and specify `LogName`. Ask an administrator to register the event source named by `Settings.ScriptName` if the execution account cannot create it.
 
@@ -121,8 +122,8 @@ For network shares, use `ComputerName: null` and UNC paths such as `\\server\sha
 
 ## Important Behavior
 
-- Files already at the same SharePoint destination are overwritten. Missing destination folders are created.
-- Source files you keep will upload again on the next run. Avoid matching destination filenames across tasks unless overwriting is intended.
+- Existing SharePoint files cause an error unless `SharePoint.Overwrite` is `true`. On a conflict, the source is neither copied nor removed. Missing destination folders are created.
+- Source files you keep are attempted again on the next run. Existing destinations then cause errors unless you enable overwriting. Avoid matching destination filenames across tasks unless overwriting is intended.
 - Files must be finished writing before upload. Do not run overlapping instances against the same source folders.
 - Hidden and system files are included. Folder links are not followed, and linked source folders or files are rejected. Empty folders are not uploaded; local folders are never removed.
 - `MaxConcurrent.JobsTotal` limits simultaneous folder jobs; `JobsPerComputer` limits them per computer or source file server. Files within each folder are processed one at a time.

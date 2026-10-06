@@ -10,6 +10,7 @@
         "SiteUrl": "https://contoso.sharepoint.com/sites/IT",
         "DocumentLibraryName": "Documents",
         "FolderPath": "Reports",
+        "Overwrite": false,
         "ClientId": "ENV:AZURE_CLIENT_ID",
         "TenantId": "ENV:AZURE_TENANT_ID",
         "CertificateThumbprint": "ENV:AZURE_POWERSHELL_CERTIFICATE_THUMBPRINT",
@@ -27,6 +28,7 @@
         "SiteUrl": "https://contoso.sharepoint.com/sites/Finance",
         "DocumentLibraryName": "Documents",
         "FolderPath": "Invoices",
+        "Overwrite": false,
         "ClientId": "ENV:AZURE_CLIENT_ID",
         "TenantId": "ENV:AZURE_TENANT_ID",
         "CertificateThumbprint": "ENV:AZURE_POWERSHELL_CERTIFICATE_THUMBPRINT"
@@ -76,6 +78,7 @@
         "SiteUrl": "Required HTTPS site URL, not a library or sharing URL.",
         "DocumentLibraryName": "Required library display name. Documents and Shared Documents are accepted aliases.",
         "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name.",
+        "Overwrite": "Optional Boolean, default false. true replaces existing SharePoint files. false or omission reports an error if a destination file already exists, and leaves the source untouched. Applies to SharePoint only; existing archive files are never overwritten.",
         "ClientId": "Required app registration client ID, or ENV:VARIABLE_NAME.",
         "TenantId": "Required tenant ID, or ENV:VARIABLE_NAME.",
         "CertificateThumbprint": "Required certificate thumbprint, or ENV:VARIABLE_NAME. Certificate/private key and credential environment variables must exist for the executing account on the worker computer. All tasks must use identical authentication settings.",
@@ -101,7 +104,7 @@
         "AssemblyPath": "MailKit and MimeKit DLL paths required unless Never. Install MailKit/MimeKit and their dependencies on the script host."
       },
       "SaveLogFiles": {
-        "Where": { "Folder": "Optional log folder, supporting ENV:. Relative paths are relative to this script folder. Null/empty disables files. Saves JSON run details, Excel results when present, and HTML when sending mail." },
+        "Where": { "Folder": "Optional log folder, supporting ENV:. Relative paths are relative to this script folder. Null/empty disables files. Excel records every file upload and file/task error. A separate System errors log.json contains only configuration/reporting errors and is created only when such errors occur. HTML is saved when sending mail." },
         "DeleteLogsAfterDays": "Optional nonnegative whole number. 0/omitted retains logs forever. Positive values remove only this script/configuration's generated logs older than that many elapsed days, by LastWriteTime. Use a dedicated log folder outside all upload sources."
       },
       "SaveInEventLog": "Save is a required Boolean. LogName is required when enabled and supports ENV:. Provision the event source beforehand when the scheduled account cannot create it."

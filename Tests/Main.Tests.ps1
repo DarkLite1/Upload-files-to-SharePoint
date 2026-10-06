@@ -41,6 +41,16 @@ Describe 'Upload configuration and orchestration' {
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*RemoveFile*'
     }
 
+    It 'accepts Boolean overwrite settings' -ForEach @($false, $true) {
+        $config.Tasks[0].SharePoint | Add-Member -NotePropertyName Overwrite -NotePropertyValue $_ -Force
+        (ConvertTo-UploadConfigurationHC $config).SharePoint.Overwrite | Should -Be $_
+    }
+
+    It 'rejects non-Boolean overwrite settings' -ForEach @('false', 1, $null) {
+        $config.Tasks[0].SharePoint | Add-Member -NotePropertyName Overwrite -NotePropertyValue $_ -Force
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Overwrite must be true or false*'
+    }
+
     It 'rejects copying inside another source folder' {
         $other = Join-Path $TestDrive 'Other'
         $config.Tasks[0].Folders += $other
@@ -64,7 +74,10 @@ Describe 'Upload configuration and orchestration' {
         $global:LASTEXITCODE | Should -Be 0
     }
 
-    It 'uses the bundled uploader and reports a successful upload' {
+    It 'passes overwrite <Overwrite> to the bundled uploader' -ForEach @(
+        @{ Overwrite = $false; Behavior = 'fail' }
+        @{ Overwrite = $true; Behavior = 'replace' }
+    ) {
         Set-Content (Join-Path $source 'report.txt') 'report'
         Import-Module Microsoft.Graph.Authentication
         Mock Get-MgContext { @{ ClientId = 'client'; TenantId = 'tenant' } }
@@ -78,12 +91,15 @@ Describe 'Upload configuration and orchestration' {
         $config.Tasks[0].SharePoint.TenantId = 'tenant'
         $config.Tasks[0].SharePoint.CertificateThumbprint = 'cert'
         $config.Tasks[0].SharePoint.FolderPath = ''
+        $config.Tasks[0].SharePoint.Overwrite = $Overwrite
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
         $result = & $main $configPath
         $result.Uploaded | Should -BeTrue
         $result.Error | Should -BeNullOrEmpty
         $global:LASTEXITCODE | Should -Be 0
-        Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter { $Method -eq 'PUT' }
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+            $Method -eq 'PUT' -and "$Uri".EndsWith("/content?@microsoft.graph.conflictBehavior=$Behavior")
+        }
     }
 
     It 'fails before execution when a later task is invalid' {
@@ -102,15 +118,25 @@ Describe 'Upload configuration and orchestration' {
         $global:LASTEXITCODE | Should -Be 1
     }
 
-    It 'writes a JSON run log for an empty source' {
+    It 'does not create a system-errors JSON file for an empty successful source' {
         $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive 'Logs'
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
         & $main $configPath
-        $log = Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '* - Log.json'
-        $run = Get-Content -LiteralPath $log.FullName -Raw | ConvertFrom-Json
-        $run.Uploaded | Should -Be 0
-        $run.Errors | Should -Be 0
+        @(Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.json').Count | Should -Be 0
         $global:LASTEXITCODE | Should -Be 0
+    }
+
+    It 'logs configuration errors only in the system-errors JSON file' {
+        $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive 'ConfigErrors'
+        $config.Tasks[0].SharePoint.Overwrite = 'false'
+        $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
+        & $main $configPath
+        $json = Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '* - System errors log.json'
+        $errors = @(Get-Content -LiteralPath $json.FullName -Raw | ConvertFrom-Json)
+        $errors.Count | Should -Be 1
+        $errors[0].Message | Should -BeLike '*Overwrite must be true or false*'
+        @(Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.xlsx').Count | Should -Be 0
+        $global:LASTEXITCODE | Should -Be 1
     }
 
     It 'runs multiple folder jobs in parallel without dropping results' {
@@ -151,6 +177,103 @@ Describe 'Upload configuration and orchestration' {
         Should -Invoke New-PSSession -Times 1
         Should -Invoke Invoke-Command -Times 0
         Should -Invoke Remove-PSSession -Times 0
+    }
+}
+
+Describe 'SharePoint overwrite behavior' {
+    BeforeEach {
+        Import-Module Microsoft.Graph.Authentication
+        $uploadPath = Join-Path $TestDrive 'report.txt'
+        Set-Content -LiteralPath $uploadPath -Value 'report'
+        $uploadParams = @{
+            FilePath = $uploadPath; SiteUrl = 'https://contoso.sharepoint.com/sites/IT'
+            DocumentLibraryName = 'Documents'; ClientId = 'client'; TenantId = 'tenant'
+            CertificateThumbprint = 'cert'; MaxRetries = 1
+        }
+        Mock Get-MgContext { @{ ClientId = 'client'; TenantId = 'tenant' } }
+        Mock Connect-MgGraph {}
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'PUT') { return @{ id = 'item'; name = 'report.txt' } }
+            if ($Method -eq 'POST') { return @{ uploadUrl = 'https://upload.example.com/session' } }
+            if ($Uri -like '*/drives') { return @{ value = @(@{ id = 'drive'; name = 'Documents' }) } }
+            return @{ id = 'site' }
+        }
+        Mock Invoke-RestMethod { @{ id = 'item'; name = 'report.txt' } }
+        Mock Start-Sleep {}
+    }
+
+    It 'defaults to server-side fail for a small file' {
+        $result = & "$scriptRoot\UploadToSharePoint.ps1" @uploadParams
+        $result.Id | Should -Be 'item'
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+            $Method -eq 'PUT' -and "$Uri".EndsWith('/content?@microsoft.graph.conflictBehavior=fail')
+        }
+    }
+
+    It 'uses <Behavior> for small uploads with overwrite <Overwrite>' -ForEach @(
+        @{ Overwrite = $false; Behavior = 'fail' }
+        @{ Overwrite = $true; Behavior = 'replace' }
+    ) {
+        $uploadParams.Overwrite = $Overwrite
+        & "$scriptRoot\UploadToSharePoint.ps1" @uploadParams
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+            $Method -eq 'PUT' -and "$Uri".EndsWith("/content?@microsoft.graph.conflictBehavior=$Behavior")
+        }
+    }
+
+    It 'also protects empty files against overwriting' {
+        Clear-Content -LiteralPath $uploadPath
+        & "$scriptRoot\UploadToSharePoint.ps1" @uploadParams
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+            $Method -eq 'PUT' -and "$Uri".EndsWith('/content?@microsoft.graph.conflictBehavior=fail')
+        }
+    }
+
+    It 'sets <Behavior> in large-file upload sessions' -ForEach @(
+        @{ Overwrite = $false; Behavior = 'fail' }
+        @{ Overwrite = $true; Behavior = 'replace' }
+    ) {
+        $stream = [IO.File]::OpenWrite($uploadPath)
+        try { $stream.SetLength(6MB) } finally { $stream.Dispose() }
+        $uploadParams.Overwrite = $Overwrite
+        $result = & "$scriptRoot\UploadToSharePoint.ps1" @uploadParams
+        $result.Id | Should -Be 'item'
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+            $Method -eq 'POST' -and ($Body | ConvertFrom-Json).item.'@microsoft.graph.conflictBehavior' -eq $Behavior
+        }
+        Should -Invoke Invoke-RestMethod -Times 2 -ParameterFilter { $Method -eq 'PUT' }
+    }
+
+    It 'reports an existing destination without retrying or post-upload actions' {
+        Mock Invoke-MgGraphRequest { throw '409 nameAlreadyExists' } -ParameterFilter { $Method -eq 'PUT' }
+        $config = Get-Content "$scriptRoot\Example.json" -Raw | ConvertFrom-Json
+        $task = [pscustomobject]@{
+            TaskIndex = 0; ComputerName = 'localhost'; Name = 'Reports'; Path = $TestDrive; Recurse = $false
+            SharePoint = $config.Tasks[0].SharePoint
+            AfterUpload = [pscustomobject]@{ RemoveFile = $true; CopyToFolder = $null }
+        }
+        $task.SharePoint.ClientId = 'client'
+        $task.SharePoint.TenantId = 'tenant'
+        $task.SharePoint.CertificateThumbprint = 'cert'
+        $task.SharePoint.FolderPath = ''
+        $uploader = Get-Content "$scriptRoot\UploadToSharePoint.ps1" -Raw
+        $result = & "$scriptRoot\Upload files.ps1" $task $uploader
+        $result.Error | Should -BeLike '*already exists and overwriting is disabled*'
+        $result.Uploaded | Should -BeFalse
+        $result.Removed | Should -BeFalse
+        Test-Path -LiteralPath $uploadPath | Should -BeTrue
+        Should -Invoke Start-Sleep -Times 0
+    }
+
+    It 'cleans up a large-file session when a conflict occurs on the final chunk' {
+        $stream = [IO.File]::OpenWrite($uploadPath)
+        try { $stream.SetLength(6MB) } finally { $stream.Dispose() }
+        Mock Invoke-RestMethod { throw '409 nameAlreadyExists' } -ParameterFilter {
+            $Method -eq 'PUT' -and $Headers.'Content-Range' -like 'bytes 5242880-*'
+        }
+        { & "$scriptRoot\UploadToSharePoint.ps1" @uploadParams } | Should -Throw '*already exists and overwriting is disabled*'
+        Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter { $Method -eq 'DELETE' }
+        Should -Invoke Start-Sleep -Times 0
     }
 }
 
@@ -198,13 +321,14 @@ Describe 'Upload reporting' {
         $systemErrors[0].Message | Should -BeLike '*SMTP unavailable*'
     }
 
-    It 'writes Excel results, JSON details and the email HTML' {
+    It 'writes Excel results and email HTML without a JSON file on success' {
         $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
         Import-Module ImportExcel
         Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
         $systemErrors.Count | Should -Be 0
         $files = @(Get-ChildItem $settings.SaveLogFiles.Where.Folder)
-        $files.Count | Should -Be 3
+        $files.Count | Should -Be 2
+        @($files | Where-Object Extension -eq '.json').Count | Should -Be 0
         $excel = $files | Where-Object Extension -eq '.xlsx'
         (Import-Excel $excel.FullName).Source | Should -Be $row.Source
         $html = $files | Where-Object Extension -eq '.html'
@@ -217,7 +341,7 @@ Describe 'Upload reporting' {
         $settings.SaveLogFiles.Where.Folder = $folder.FullName
         $settings.SaveLogFiles.DeleteLogsAfterDays = 30
         $settings.SendMail.When = 'Never'
-        $oldName = '2020_01_01_120000_000 - Upload files to SharePoint (Test) - Log.json'
+        $oldName = '2020_01_01_120000_000 - Upload files to SharePoint (Test) - System errors log.json'
         $otherName = '2020_01_01_120000_000 - Upload files to SharePoint (Other) - Log.json'
         $unrelatedName = '2020_01_01_120000_000 - Upload files to SharePoint (Test) - keep.txt'
         foreach ($name in $oldName, $otherName, $unrelatedName) {
@@ -231,7 +355,7 @@ Describe 'Upload reporting' {
         Test-Path -LiteralPath (Join-Path $folder $unrelatedName) | Should -BeTrue
     }
 
-    It 'records event-log failures in the JSON run log' {
+    It 'records event-log failures in the system-errors JSON file' {
         $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
         $settings.SendMail.When = 'Never'
         $settings.SaveInEventLog.Save = $true
@@ -239,8 +363,59 @@ Describe 'Upload reporting' {
         Send-UploadReportHC $settings @() $systemErrors (Get-Date) 'Test'
         $systemErrors.Count | Should -Be 1
         $json = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.json'
-        $run = Get-Content $json.FullName -Raw | ConvertFrom-Json
-        $run.Errors | Should -Be 1
-        $run.SystemErrors[0].Message | Should -BeLike '*Event log unavailable*'
+        $errors = @(Get-Content $json.FullName -Raw | ConvertFrom-Json)
+        $errors.Count | Should -Be 1
+        $errors[0].Message | Should -BeLike '*Event log unavailable*'
+    }
+
+    It 'logs every file result in Excel and only system errors in JSON' {
+        $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $settings.SendMail.When = 'Never'
+        $conflict = [pscustomobject]@{
+            ComputerName = 'localhost'; Name = 'Reports'; Source = 'C:\Exports\existing.txt'; Destination = 'Reports/existing.txt'
+            Uploaded = $false; CopiedTo = ''; Removed = $false; Error = 'SharePoint file already exists and overwriting is disabled.'
+        }
+        $copyError = [pscustomobject]@{
+            ComputerName = 'localhost'; Name = 'Reports'; Source = 'C:\Exports\archive.txt'; Destination = 'Reports/archive.txt'
+            Uploaded = $true; CopiedTo = ''; Removed = $false; Error = 'Archive already exists'
+        }
+        $systemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = 'Configuration failure' })
+        Send-UploadReportHC $settings @($row, $conflict, $copyError) $systemErrors (Get-Date) 'Test'
+        $excel = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx'
+        $logged = @(Import-Excel $excel.FullName)
+        $logged.Count | Should -Be 3
+        @($logged | Where-Object Uploaded).Count | Should -Be 2
+        @($logged | Where-Object Error).Count | Should -Be 2
+        ($logged | Where-Object Source -eq $conflict.Source).Error | Should -Be $conflict.Error
+        ($logged | Where-Object Source -eq $copyError.Source).Error | Should -Be $copyError.Error
+        $json = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '* - System errors log.json'
+        $text = Get-Content $json.FullName -Raw
+        $errors = @($text | ConvertFrom-Json)
+        $errors.Count | Should -Be 1
+        $errors[0].Message | Should -Be 'Configuration failure'
+        $errors[0].DateTime | Should -Not -BeNullOrEmpty
+        $text | Should -Not -Match 'Source|Uploaded|Destination|Archive already exists'
+    }
+
+    It 'does not create JSON for file errors without system errors' {
+        $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $settings.SendMail.When = 'Never'
+        $row.Uploaded = $false
+        $row.Error = 'SharePoint file already exists'
+        Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
+        $excel = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx'
+        (Import-Excel $excel.FullName).Error | Should -Be $row.Error
+        @(Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.json').Count | Should -Be 0
+    }
+
+    It 'logs Excel export failure as a system error' {
+        $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $settings.SendMail.When = 'Never'
+        Mock Export-Excel { throw 'Workbook is locked' }
+        Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
+        $json = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '* - System errors log.json'
+        $errors = @(Get-Content $json.FullName -Raw | ConvertFrom-Json)
+        $errors.Count | Should -Be 1
+        $errors[0].Message | Should -BeLike '*Workbook is locked*'
     }
 }

@@ -63,6 +63,7 @@ foreach ($sourceFile in $files) {
             ClientId = $Task.SharePoint.ClientId
             TenantId = $Task.SharePoint.TenantId
             CertificateThumbprint = $Task.SharePoint.CertificateThumbprint
+            Overwrite = [bool]$Task.SharePoint.Overwrite
         }
         foreach ($property in 'MaxRetries', 'ChunkSizeMB') {
             if ($null -ne $Task.SharePoint.$property) { $uploadParams[$property] = $Task.SharePoint.$property }
