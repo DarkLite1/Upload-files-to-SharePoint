@@ -235,10 +235,19 @@ Describe 'Upload configuration and orchestration' {
         $global:LASTEXITCODE | Should -Be 1
     }
 
-    It 'does not create a system-errors JSON file for an empty successful source' {
-        $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive 'Logs'
+    It 'does not create Excel or system-errors JSON when the source is <Description>' -ForEach @(
+        @{ Description = 'empty'; ExcludeFile = $false }
+        @{ Description = 'fully excluded'; ExcludeFile = $true }
+    ) {
+        if ($ExcludeFile) {
+            $excludedPath = Join-Path $source.FullName 'excluded.txt'
+            Set-Content -LiteralPath $excludedPath -Value 'excluded report'
+            $config.Tasks[0].Exclude.Files = @($excludedPath)
+        }
+        $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
-        & $main $configPath
+        @(& $main $configPath).Count | Should -Be 0
+        @(Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.xlsx').Count | Should -Be 0
         @(Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.json').Count | Should -Be 0
         $global:LASTEXITCODE | Should -Be 0
     }
