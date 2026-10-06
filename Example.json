@@ -122,7 +122,7 @@
       },
       "SaveLogFiles": {
         "Where": {
-          "Folder": "Optional log folder, supporting ENV:. Relative paths are relative to this script folder. Null/empty disables files. Excel Overview records file/task results with FullName, CreationTime, LastWriteTime, Length (bytes), completed Action and upload/copy/removal status. Errors contains failed file/task results with diagnostic details, or only headers when none failed. A separate System errors log.json contains only configuration/reporting errors and is created only when such errors occur. HTML is saved when sending mail."
+          "Folder": "Optional log folder, supporting ENV:. Relative paths are relative to this script folder. Null/empty disables files. Excel Overview records file/task results with FullName, CreationTime, LastWriteTime, Length (bytes), completed Action and upload/copy/removal status. The Errors worksheet is created only when file/task errors occur and contains their diagnostic details. A separate System errors log.json contains only configuration/reporting errors and is created only when such errors occur. HTML is saved when sending mail."
         },
         "DeleteLogsAfterDays": "Optional nonnegative whole number. 0/omitted retains logs forever. Positive values remove only this script/configuration's generated logs older than that many elapsed days, by LastWriteTime. Use a dedicated log folder outside all upload sources."
       },

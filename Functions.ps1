@@ -773,20 +773,6 @@ function Send-UploadReportHC {
                     $fileErrors | Select-Object -Property $errorColumns |
                         Export-Excel @excelParams -WorksheetName 'Errors' -TableName 'Errors'
                 }
-                else {
-                    $package = Open-ExcelPackage -Path $excelPath -ErrorAction Stop
-                    try {
-                        $worksheet = Add-Worksheet -ExcelPackage $package -WorksheetName 'Errors'
-                        for ($columnIndex = 0; $columnIndex -lt $errorColumns.Count; $columnIndex++) {
-                            $worksheet.Cells[1, ($columnIndex + 1)].Value = $errorColumns[$columnIndex]
-                        }
-                        $worksheet.Cells[1, 1, 1, $errorColumns.Count].Style.Font.Bold = $true
-                        $worksheet.View.FreezePanes(2, 1)
-                        $worksheet.Cells.AutoFitColumns()
-                        $package.Save()
-                    }
-                    finally { if ($package) { $package.Dispose() } }
-                }
                 $attachments += $excelPath
             }
         }

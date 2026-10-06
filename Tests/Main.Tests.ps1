@@ -449,7 +449,7 @@ Describe 'Upload reporting' {
         $systemErrors[0].Message | Should -BeLike '*SMTP unavailable*'
     }
 
-    It 'writes Excel results and email HTML without a JSON file on success' {
+    It 'writes Excel results and email HTML without an Errors sheet or JSON file on success' {
         $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
         Import-Module ImportExcel
         Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
@@ -462,11 +462,7 @@ Describe 'Upload reporting' {
         $package = Open-ExcelPackage -Path $excel.FullName
         try {
             $package.Workbook.Worksheets.Name | Should -Contain 'Overview'
-            $package.Workbook.Worksheets.Name | Should -Contain 'Errors'
-            $errorSheet = $package.Workbook.Worksheets['Errors']
-            $errorSheet.Dimension.End.Row | Should -Be 1
-            $errorSheet.Cells[1, 9].Value | Should -Be 'Error'
-            $errorSheet.Cells[1, 10].Value | Should -Be 'Stage'
+            $package.Workbook.Worksheets.Name | Should -Not -Contain 'Errors'
         }
         finally { $package.Dispose() }
         $html = $files | Where-Object Extension -eq '.html'
