@@ -57,6 +57,8 @@ For your first run, keep only the first example task and change:
 | `Tasks[].Folders` | Your source folder paths. Entries can be strings or objects with `Name` and `Path`. |
 | `Tasks[].Recurse` | `true` to include subfolders, preserving their relative paths; otherwise `false`. |
 | `Tasks[].Exclude.Attributes` | Optional array: `["Hidden"]`, `["System"]`, or `["Hidden", "System"]` to skip those files and folder trees. Use `[]` or omit the setting to include them. |
+| `Tasks[].Exclude.Folders` | Optional array of absolute subfolder paths to skip with all their contents. |
+| `Tasks[].Exclude.Files` | Optional array of absolute file paths to skip. |
 | `Tasks[].SharePoint` | Your site URL, library name, optional destination `FolderPath`, client ID, tenant ID, and certificate thumbprint. |
 | `Tasks[].SharePoint.Overwrite` | `false` (default) reports an error if the destination file exists. Set to `true` only when you want to replace existing SharePoint files. |
 | `Settings.ScriptName` | A name for your reports and log files. |
@@ -107,19 +109,25 @@ For example, to archive successful uploads and then remove their source files:
 
 Failed uploads never trigger copying or removal. If copying fails, the source stays in place. Existing archive files are not overwritten; a name collision is reported as an error. Missing archive folders are created. Archive folders must be outside all source folders, and source folders must not overlap.
 
-## Exclude Hidden or System Files
+## Exclusions
 
-Add this to a task to skip both attributes:
+Use separate lists for attributes, folder paths, and file paths. For a source folder `C:\Exports\Reports`, for example:
 
 ```json
 "Exclude": {
-  "Attributes": ["Hidden", "System"]
+  "Attributes": ["Hidden", "System"],
+  "Folders": ["C:\\Exports\\Reports\\Drafts"],
+  "Files": ["C:\\Exports\\Reports\\status.json"]
 }
 ```
 
-A file matching either attribute is not uploaded, copied, or removed. A matching folder, including a source folder, is skipped together with everything inside it. Excluded items are not errors and do not appear as uploads in the reports. Access errors on non-excluded items are still reported.
+`Attributes` accepts `Hidden`, `System`, or both. Items matching either selected attribute are skipped; an attribute-excluded folder, including a source root, protects its entire contents.
 
-Use only `"Hidden"` or only `"System"` to exclude one attribute. Omit `Exclude`, use `{}`, or set `Attributes` to `[]` to include both. The first example task excludes both attributes.
+`Folders` excludes specific subfolder trees. `Files` excludes specific files. Each path must be below a source folder in the same task, using an absolute local or UNC path. Matching is case-insensitive and literal, not wildcard-based. `ENV:` values resolve on the computer running the command.
+
+Excluded files are never uploaded, copied, or removed. Excluded folders are not entered. Excluded items are not errors and do not appear as uploads in the reports. Access errors on non-excluded items are still reported.
+
+All three lists are optional. Omit a list or set it to `[]` when unused; omit `Exclude` or use `{}` for no exclusions. The first example task excludes Hidden and System attributes and leaves the file and folder lists empty.
 
 ## Optional Reporting
 

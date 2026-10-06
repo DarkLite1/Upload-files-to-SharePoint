@@ -7,8 +7,8 @@
     Internal worker used locally or through PowerShell remoting by Main.ps1.
     UploadScript contains the bundled single-file uploader, so remote computers
     do not need a copy of this script folder. They do need the Graph module.
-    Task.Exclude.Attributes optionally skips Hidden/System files and entire
-    matching folder trees. Omitted or empty exclusions include all attributes.
+    Task.Exclude groups Attributes (Hidden/System), Folders (subfolder trees),
+    and Files (literal file paths). Omitted or empty lists exclude nothing.
 #>
 [CmdletBinding()]
 param (
@@ -21,6 +21,14 @@ $uploader = [scriptblock]::Create($UploadScript)
 $excludedAttributeMask = [IO.FileAttributes]0
 foreach ($attribute in $Task.Exclude.Attributes) {
     $excludedAttributeMask = $excludedAttributeMask -bor [IO.FileAttributes]$attribute
+}
+$excludedFolders = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$excludedFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($path in $Task.Exclude.Folders) {
+    $null = $excludedFolders.Add([IO.Path]::GetFullPath($path.Replace('/', '\')).TrimEnd('\'))
+}
+foreach ($path in $Task.Exclude.Files) {
+    $null = $excludedFiles.Add([IO.Path]::GetFullPath($path.Replace('/', '\')).TrimEnd('\'))
 }
 $root = Get-Item -LiteralPath $Task.Path -Force
 if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -38,11 +46,12 @@ if ($copyRoot) {
 
 $enumerationErrors = [Collections.Generic.List[object]]::new()
 $files = @(
-    if ($excludedAttributeMask) {
+    if ($excludedAttributeMask -or $excludedFolders.Count) {
         $pending = [Collections.Generic.Stack[string]]::new()
         $pending.Push($root.FullName)
         while ($pending.Count) {
             $directoryPath = $pending.Pop()
+            if ($excludedFolders.Contains($directoryPath.TrimEnd('\'))) { continue }
             try {
                 $attributes = [IO.File]::GetAttributes($directoryPath)
                 if ($attributes -band ($excludedAttributeMask -bor [IO.FileAttributes]::ReparsePoint)) { continue }
@@ -58,7 +67,7 @@ $files = @(
                 ForEach-Object {
                     if ($_.Attributes -band $excludedAttributeMask) { return }
                     if ($_.PSIsContainer) {
-                        if ($Task.Recurse -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                        if ($Task.Recurse -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and -not $excludedFolders.Contains($_.FullName.TrimEnd('\'))) {
                             $pending.Push($_.FullName)
                         }
                     }
@@ -82,6 +91,7 @@ foreach ($failure in $enumerationErrors) {
 }
 
 foreach ($sourceFile in $files) {
+    if ($excludedFiles.Contains($sourceFile.FullName)) { continue }
     $result = [PSCustomObject]@{
         TaskIndex = $Task.TaskIndex; ComputerName = $Task.ComputerName; Name = $Task.Name
         Source = $sourceFile.FullName; Destination = ''; WebUrl = ''

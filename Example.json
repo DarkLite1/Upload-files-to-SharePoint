@@ -6,7 +6,11 @@
       "ComputerName": "localhost",
       "Folders": [{ "Name": "Reports", "Path": "C:\\Exports\\Reports" }],
       "Recurse": true,
-      "Exclude": { "Attributes": ["Hidden", "System"] },
+      "Exclude": {
+        "Attributes": ["Hidden", "System"],
+        "Folders": [],
+        "Files": []
+      },
       "SharePoint": {
         "SiteUrl": "https://contoso.sharepoint.com/sites/IT",
         "DocumentLibraryName": "Documents",
@@ -82,7 +86,10 @@
       "Folders": "Nonempty array of absolute folder paths or objects with Name and Path. ENV: values are resolved on the script host. Overlapping source folders on the same computer are rejected.",
       "Recurse": "Required Boolean. true preserves relative subfolders in SharePoint and in CopyToFolder; false uploads only files directly in the source. Hidden/system files are included unless excluded; directory links are not followed.",
       "Exclude": {
-        "Attributes": "Optional array containing Hidden, System, both, or neither. Matching files are not uploaded, copied, or removed. Matching folders, including a source root, are not entered and their entire contents are skipped. Omit Exclude, use an empty object, or set Attributes to [] to include all attributes. Null, scalar values, and other attributes are rejected. Excluded items are not errors or upload results; genuine access errors are still reported."
+        "?": "Optional exclusions for this task. Omit unused properties or use empty arrays. An empty object means no exclusions. Excluded files are not uploaded, copied, or removed. Excluded folder trees are not entered. Excluded items are not errors or upload results; genuine access errors are still reported.",
+        "Attributes": "Optional array containing Hidden, System, both, or neither. Items matching ANY listed attribute are excluded. Applies to files and folders, including source roots. Defaults to [] when omitted.",
+        "Folders": "Optional array of absolute folder paths to skip, including all their contents. Each path must be a subfolder of a source in this task's Folders. Paths are literal, case-insensitive and normalized; wildcards are not supported. Supports ENV: values resolved on the script host.",
+        "Files": "Optional array of absolute file paths to skip. Each path must be below a source in this task's Folders. Paths are literal, case-insensitive and normalized; wildcards are not supported. Supports ENV: values resolved on the script host."
       },
       "SharePoint": {
         "SiteUrl": "Required HTTPS site URL, not a library or sharing URL.",

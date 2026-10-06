@@ -204,4 +204,55 @@ Describe 'Upload worker post-upload safety' {
         $result.CopiedTo | Should -BeNullOrEmpty
         Test-Path -LiteralPath $sourcePath | Should -BeTrue
     }
+
+    It 'does not upload, copy or remove an explicitly excluded file' {
+        $task | Add-Member Exclude ([pscustomobject]@{ Files = @($sourcePath) })
+        $task.AfterUpload.RemoveFile = $true
+        $task.AfterUpload.CopyToFolder = $archive
+        @(& $worker $task 'throw "Excluded file reached uploader"').Count | Should -Be 0
+        Test-Path -LiteralPath $sourcePath | Should -BeTrue
+        Test-Path -LiteralPath $archive | Should -BeFalse
+    }
+
+    It 'matches excluded file paths literally, case-insensitively and after normalization' {
+        Set-Content -LiteralPath (Join-Path $source 'report1.txt') -Value 'included'
+        $excludedPath = (Join-Path $source 'unused/../report[1].txt').Replace('\', '/').ToUpperInvariant()
+        $task | Add-Member Exclude ([pscustomobject]@{ Files = @($excludedPath) })
+        $results = @(& $worker $task $success)
+        $results.Count | Should -Be 1
+        $results[0].Source | Should -Be (Join-Path $source 'report1.txt')
+    }
+
+    It 'prunes excluded folder trees but still visits similarly named folders' {
+        $excluded = New-Item -ItemType Directory (Join-Path $source 'Skip')
+        $nested = New-Item -ItemType Directory (Join-Path $excluded 'Nested')
+        Set-Content (Join-Path $nested 'protected.txt') 'protected'
+        $included = New-Item -ItemType Directory (Join-Path $source 'Skip2')
+        Set-Content (Join-Path $included 'included.txt') 'included'
+        $task.Recurse = $true
+        $task | Add-Member Exclude ([pscustomobject]@{ Folders = @($excluded.FullName.ToUpperInvariant() + '/') })
+        Mock Get-ChildItem { & $getChildItemCommand -LiteralPath $LiteralPath -Force }
+        Mock Get-ChildItem { throw 'Excluded directory was entered' } -ParameterFilter { $LiteralPath -eq $excluded.FullName }
+        $results = @(& $worker $task $success)
+        $results.Count | Should -Be 2
+        @($results | Where-Object Error).Count | Should -Be 0
+        $results.Destination | Should -Contain 'Reports/Skip2/included.txt'
+        Should -Invoke Get-ChildItem -Times 0 -ParameterFilter { $LiteralPath -eq $excluded.FullName }
+    }
+
+    It 'combines file, folder and attribute exclusions' {
+        $hidden = Join-Path $source 'hidden.txt'
+        Set-Content $hidden 'hidden'
+        [IO.File]::SetAttributes($hidden, [IO.FileAttributes]::Hidden)
+        $excluded = New-Item -ItemType Directory (Join-Path $source 'Skip')
+        Set-Content (Join-Path $excluded 'protected.txt') 'protected'
+        Set-Content (Join-Path $source 'included.txt') 'included'
+        $task.Recurse = $true
+        $task | Add-Member Exclude ([pscustomobject]@{
+            Attributes = @('Hidden'); Folders = @($excluded.FullName); Files = @($sourcePath)
+        })
+        $results = @(& $worker $task $success)
+        $results.Count | Should -Be 1
+        $results[0].Source | Should -Be (Join-Path $source 'included.txt')
+    }
 }

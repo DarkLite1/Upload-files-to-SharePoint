@@ -99,6 +99,75 @@ Describe 'Upload configuration and orchestration' {
         Test-Path -LiteralPath $config.Tasks[0].AfterUpload.CopyToFolder | Should -BeFalse
     }
 
+    It 'accepts empty file and folder exclusions' {
+        $config.Tasks[0].Exclude = [pscustomobject]@{ Attributes = @(); Folders = @(); Files = @() }
+        $prepared = ConvertTo-UploadConfigurationHC $config
+        @($prepared.Exclude.Folders).Count | Should -Be 0
+        @($prepared.Exclude.Files).Count | Should -Be 0
+    }
+
+    It 'routes each exclusion to its source folder after normalization' {
+        $other = Join-Path $TestDrive 'OtherReports'
+        $config.Tasks[0].Folders += $other
+        $config.Tasks[0].Exclude = [pscustomobject]@{
+            Folders = @((Join-Path $source 'Unused/../Drafts/').Replace('\', '/'))
+            Files = @((Join-Path $other 'status.json').ToUpperInvariant())
+        }
+        $prepared = @(ConvertTo-UploadConfigurationHC $config)
+        $prepared.Count | Should -Be 2
+        $prepared[0].Exclude.Folders | Should -Be @(Join-Path $source 'Drafts')
+        @($prepared[0].Exclude.Files).Count | Should -Be 0
+        @($prepared[1].Exclude.Folders).Count | Should -Be 0
+        $prepared[1].Exclude.Files | Should -Be @((Join-Path $other 'status.json').ToUpperInvariant())
+    }
+
+    It 'accepts UNC exclusions below the correct source share' {
+        $config.Tasks[0].ComputerName = $null
+        $config.Tasks[0].Folders = @('\\server\share\Reports')
+        $config.Tasks[0].Exclude = [pscustomobject]@{
+            Folders = @('\\SERVER\share\Reports\Drafts\')
+            Files = @('\\server\share\Reports\status.json')
+        }
+        $prepared = ConvertTo-UploadConfigurationHC $config
+        $prepared.Exclude.Folders | Should -Be @('\\SERVER\share\Reports\Drafts')
+        $prepared.Exclude.Files | Should -Be @('\\server\share\Reports\status.json')
+    }
+
+    It 'rejects <Case> in Exclude.<Property>' -ForEach @(
+        foreach ($property in 'Folders', 'Files') {
+            foreach ($case in 'Null', 'Scalar', 'Blank', 'Number', 'Relative', 'Root', 'Sibling', 'Traversal', 'Wildcard') {
+                @{ Property = $property; Case = $case }
+            }
+        }
+    ) {
+        $values = switch ($Case) {
+            'Null' { $null }
+            'Scalar' { Join-Path $source 'entry' }
+            'Blank' { ,@(' ') }
+            'Number' { ,@(1) }
+            'Relative' { ,@('entry') }
+            'Root' { ,@($source.FullName) }
+            'Sibling' { ,@($source.FullName + 'Other\entry') }
+            'Traversal' { ,@(Join-Path $source '..\outside') }
+            'Wildcard' { ,@(Join-Path $source '*.txt') }
+        }
+        $config.Tasks[0].Exclude = [pscustomobject]@{ $Property = $values }
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw "*Exclude.$Property*"
+    }
+
+    It 'passes a file exclusion through Main without post-upload actions' {
+        $path = Join-Path $source 'protected.txt'
+        Set-Content -LiteralPath $path -Value 'protected'
+        $config.Tasks[0].Exclude = [pscustomobject]@{ Files = @($path) }
+        $config.Tasks[0].AfterUpload.RemoveFile = $true
+        $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
+        $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
+        @(& $main $configPath).Count | Should -Be 0
+        $global:LASTEXITCODE | Should -Be 0
+        Test-Path -LiteralPath $path | Should -BeTrue
+        Test-Path -LiteralPath $config.Tasks[0].AfterUpload.CopyToFolder | Should -BeFalse
+    }
+
     It 'rejects copying inside another source folder' {
         $other = Join-Path $TestDrive 'Other'
         $config.Tasks[0].Folders += $other

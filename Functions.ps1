@@ -599,10 +599,11 @@ function ConvertTo-UploadConfigurationHC {
             if ($property -notin '?', 'ComputerName', 'Folders', 'Recurse', 'Exclude', 'SharePoint', 'AfterUpload') { throw "Unsupported property '$prefix.$property'." }
         }
         $excludeAttributes = @()
+        $excludedPaths = @{ Folders = @(); Files = @() }
         if ($task.PSObject.Properties.Name -contains 'Exclude') {
             if ($task.Exclude -isnot [pscustomobject]) { throw "$prefix.Exclude must be an object." }
             foreach ($property in $task.Exclude.PSObject.Properties.Name) {
-                if ($property -notin '?', 'Attributes') { throw "Unsupported property '$prefix.Exclude.$property'." }
+                if ($property -notin '?', 'Attributes', 'Folders', 'Files') { throw "Unsupported property '$prefix.Exclude.$property'." }
             }
             if ($task.Exclude.PSObject.Properties.Name -contains 'Attributes') {
                 if ($task.Exclude.Attributes -isnot [array]) { throw "$prefix.Exclude.Attributes must be an array containing Hidden and/or System." }
@@ -612,6 +613,22 @@ function ConvertTo-UploadConfigurationHC {
                     }
                 }
                 $excludeAttributes = @($task.Exclude.Attributes | Select-Object -Unique)
+            }
+            foreach ($property in 'Folders', 'Files') {
+                if ($task.Exclude.PSObject.Properties.Name -notcontains $property) { continue }
+                if ($task.Exclude.$property -isnot [array]) { throw "$prefix.Exclude.$property must be an array of paths." }
+                $excludedPaths[$property] = @(
+                    foreach ($excludedPath in $task.Exclude.$property) {
+                        if ($excludedPath -isnot [string] -or [string]::IsNullOrWhiteSpace($excludedPath)) {
+                            throw "$prefix.Exclude.$property must contain nonempty path strings."
+                        }
+                        $excludedPath = (Get-StringValueHC $excludedPath).Replace('/', '\')
+                        if ($excludedPath -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)' -or $excludedPath -match '[*?]') {
+                            throw "$prefix.Exclude.$property requires absolute local or UNC paths without wildcards."
+                        }
+                        [IO.Path]::GetFullPath($excludedPath).TrimEnd('\')
+                    }
+                )
             }
         }
         if ($task.Folders -isnot [array] -or $task.Folders.Count -eq 0) { throw "$prefix.Folders must be a nonempty array." }
@@ -653,11 +670,12 @@ function ConvertTo-UploadConfigurationHC {
         $copyFolder = Get-StringValueHC $after.CopyToFolder
         if ($copyFolder -and $copyFolder -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') { throw "$prefix.AfterUpload.CopyToFolder must be an absolute local or UNC path." }
         if ($copyFolder) { $copyFolder = [IO.Path]::GetFullPath($copyFolder).TrimEnd('\') }
+        $folderPaths = @()
         foreach ($folder in $task.Folders) {
             if ($folder -is [string]) { $path = $folder; $name = '' }
             elseif ($folder -is [pscustomobject] -and $folder.Path -is [string]) { $path = $folder.Path; $name = $folder.Name }
             else { throw "$prefix.Folders entries must be strings or objects with Path and optional Name." }
-            $path = Get-StringValueHC $path
+            $path = (Get-StringValueHC $path).Replace('/', '\')
             if ($path -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') { throw "$prefix.Folders requires absolute local or UNC paths." }
             $path = [IO.Path]::GetFullPath($path)
             $computer = $task.ComputerName
@@ -667,12 +685,30 @@ function ConvertTo-UploadConfigurationHC {
             if (-not $computer -or $computer -in 'localhost', '.', $env:COMPUTERNAME) { $computer = $env:COMPUTERNAME }
             if ($isUnc -and $computer -ne $env:COMPUTERNAME) { throw "${prefix}: use ComputerName null for UNC paths to avoid a remoting double hop." }
             $target = if ($isUnc) { ($path -split '\\')[2] } else { $computer }
+            $folderPaths += $path.TrimEnd('\')
+            $pathPrefix = "$($path.TrimEnd('\'))\"
+            $pathExclusions = @{ Attributes = $excludeAttributes }
+            foreach ($property in 'Folders', 'Files') {
+                $pathExclusions[$property] = @($excludedPaths[$property] | Where-Object {
+                        $_.StartsWith($pathPrefix, [StringComparison]::OrdinalIgnoreCase)
+                    })
+            }
             $prepared.Add([pscustomobject]@{
-                TaskIndex = $taskIndex; ComputerName = $computer; Target = $target; Name = $name
-                Path = $path; Recurse = $task.Recurse; SharePoint = $task.SharePoint
-                Exclude = [pscustomobject]@{ Attributes = $excludeAttributes }
-                AfterUpload = [pscustomobject]@{ RemoveFile = [bool]$after.RemoveFile; CopyToFolder = $copyFolder }
-            })
+                    TaskIndex = $taskIndex; ComputerName = $computer; Target = $target; Name = $name
+                    Path = $path; Recurse = $task.Recurse; SharePoint = $task.SharePoint
+                    Exclude = [pscustomobject]$pathExclusions
+                    AfterUpload = [pscustomobject]@{ RemoveFile = [bool]$after.RemoveFile; CopyToFolder = $copyFolder }
+                })
+        }
+        foreach ($property in 'Folders', 'Files') {
+            foreach ($excludedPath in $excludedPaths[$property]) {
+                $matchingRoots = @($folderPaths | Where-Object {
+                        $excludedPath.StartsWith("$_\", [StringComparison]::OrdinalIgnoreCase)
+                    })
+                if (-not $matchingRoots) {
+                    throw "$prefix.Exclude.$property path '$excludedPath' must be below a source folder in this task."
+                }
+            }
         }
     }
     foreach ($task in $prepared) {
@@ -735,13 +771,13 @@ function Send-UploadReportHC {
             $body = "<html><body><h1>$title</h1><p>$summary</p>$($sendMail.Body)<ul>$errorsHtml</ul>$($rows -join [Environment]::NewLine)</body></html>"
             if ($baseLogName) { Set-Content -LiteralPath "$baseLogName - Mail.html" -Value $body -Encoding utf8 -ErrorAction Stop }
             $mailParams = @{
-                From = Get-StringValueHC $sendMail.From
-                SmtpServerName = Get-StringValueHC $sendMail.Smtp.ServerName
-                SmtpPort = Get-StringValueHC "$($sendMail.Smtp.Port)"
+                From                = Get-StringValueHC $sendMail.From
+                SmtpServerName      = Get-StringValueHC $sendMail.Smtp.ServerName
+                SmtpPort            = Get-StringValueHC "$($sendMail.Smtp.Port)"
                 MailKitAssemblyPath = Get-StringValueHC $sendMail.AssemblyPath.MailKit
                 MimeKitAssemblyPath = Get-StringValueHC $sendMail.AssemblyPath.MimeKit
-                Subject = (@($summary, $sendMail.Subject) | Where-Object { $_ }) -join ', '
-                Body = $body
+                Subject             = (@($summary, $sendMail.Subject) | Where-Object { $_ }) -join ', '
+                Body                = $body
             }
             foreach ($property in 'To', 'Bcc') { if ($sendMail.$property) { $mailParams[$property] = $sendMail.$property } }
             if ($sendMail.FromDisplayName) { $mailParams.FromDisplayName = Get-StringValueHC $sendMail.FromDisplayName }
@@ -769,7 +805,7 @@ function Send-UploadReportHC {
     if ($baseLogName -and $SystemErrors.Count) {
         try {
             ConvertTo-Json -InputObject $SystemErrors.ToArray() -Depth 5 |
-                Set-Content -LiteralPath "$baseLogName - System errors log.json" -Encoding utf8 -ErrorAction Stop
+            Set-Content -LiteralPath "$baseLogName - System errors log.json" -Encoding utf8 -ErrorAction Stop
         }
         catch { $SystemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = "Failed saving JSON log: $_" }) }
     }
