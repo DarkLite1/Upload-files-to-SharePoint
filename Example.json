@@ -131,7 +131,7 @@
         "To": "Recipient array. At least one To or Bcc recipient is required unless Never.",
         "Bcc": "Optional BCC recipient array.",
         "Subject": "Optional text appended to the generated uploaded/error count subject.",
-        "Body": "Optional trusted HTML displayed before the results table.",
+        "Body": "Optional trusted HTML displayed below the title. The report adds summary pills, a system-error count, computer cards, and run times. Each configured task has one compact row showing only linked source paths, the upload count, and the error count when nonzero. Detailed file results remain in Excel. Detailed errors are not displayed in email: file/task errors belong in Excel; errors not related to a task belong in the system-errors JSON log. Enable file logging to retain details. Failed computers and tasks appear first. When logging is enabled, the exact email HTML is saved and Outlook receives a browser-view link.",
         "Smtp": "ServerName and Port required unless Never. Ports: 25, 465, 587, 2525. ConnectionType: None (default), Auto, SslOnConnect, StartTls, StartTlsWhenAvailable. Set both UserName and Password or neither.",
         "AssemblyPath": "MailKit and MimeKit DLL paths required unless Never. Install MailKit/MimeKit and their dependencies on the script host."
       },

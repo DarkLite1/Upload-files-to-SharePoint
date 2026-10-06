@@ -732,7 +732,159 @@ Describe 'Upload reporting' {
     It 'counts a post-upload failure as both an upload and an error' {
         $row.Error = 'Archive already exists'
         Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
-        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter { $Subject -eq '1 uploaded, 1 errors' -and $Body -like '*Archive already exists*' }
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter { $Subject -eq '1 uploaded, 1 errors' -and $Body -notlike '*Archive already exists*' -and $Body.Contains('1&nbsp;error') }
+    }
+
+    It 'renders upload summary pills with Outlook and browser markup' {
+        $row.Error = 'Archive already exists'
+        Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
+        $systemErrors.Count | Should -Be 0
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Body -like '*Summary*' -and $Body -like '*1 Uploaded*' -and $Body -like '*1 Error*' -and
+            $Body -like '*<v:roundrect*' -and $Body.Contains('<!--[if !mso]><!-->')
+        }
+    }
+
+    It 'groups configured paths by task and shows idle tasks with errors first' {
+        $tasks = @(
+            [pscustomobject]@{ TaskIndex = 0; ComputerName = 'SERVERB'; Name = 'Alpha'; Path = 'C:\One'; UploadType = 'Folder' }
+            [pscustomobject]@{ TaskIndex = 0; ComputerName = 'SERVERB'; Name = 'Beta'; Path = 'C:\Two'; UploadType = 'Folder' }
+            [pscustomobject]@{ TaskIndex = 1; ComputerName = 'SERVERB'; Name = 'Idle'; Path = 'C:\Three'; UploadType = 'Folder' }
+            [pscustomobject]@{ TaskIndex = 2; ComputerName = 'localhost'; Name = 'Share'; Path = '\\filesA\share\report.txt'; UploadType = 'File' }
+        )
+        $results = @(
+            [pscustomobject]@{ TaskIndex = 0; Source = 'C:\One\a.txt'; Uploaded = $true; CopiedTo = 'D:\Archive\a.txt'; Removed = $false; Error = 'Remove denied'; Stage = 'Remove file' }
+            [pscustomobject]@{ TaskIndex = 2; Source = '\\filesA\share\report.txt'; Uploaded = $true; CopiedTo = ''; Removed = $true; Error = '' }
+        )
+        $jobs = @(Get-UploadMailJobsHC -Tasks $tasks -Results $results)
+        $jobs.Count | Should -Be 3
+        $jobs[0].Entries.Count | Should -Be 2
+        $jobs[0].Uploaded | Should -Be 1
+        $jobs[0].Copied | Should -Be 1
+        $jobs[0].Errors | Should -Be 1
+        $jobs[1].Uploaded | Should -Be 0
+        $jobs[1].Errors | Should -Be 0
+        $jobs[2].ComputerName | Should -Be 'filesA'
+        $body = Get-MailBodyHtmlHC -ScriptName 'Upload' -Job $jobs -Uploaded 2 -Errors 1 -ScriptStartTime (Get-Date)
+        [regex]::Matches($body, 'class="task-row"').Count | Should -Be 3
+        [regex]::Matches($body, 'class="computer-card"').Count | Should -Be 2
+        $body.IndexOf('SERVERB') | Should -BeLessThan $body.IndexOf('filesA')
+        $body.IndexOf('C:\One') | Should -BeLessThan $body.IndexOf('C:\Three')
+        $body | Should -BeLike '*file://serverb/C$/One*'
+        $body | Should -Not -BeLike '*1&nbsp;copied*'
+        $body | Should -Not -BeLike '*1&nbsp;removed*'
+        $body | Should -Not -BeLike '*Remove denied*'
+        $body | Should -BeLike '*0&nbsp;uploaded*'
+    }
+
+    It 'shows only linked paths and counts in a row with <Errors> errors' -ForEach @(
+        @{ Uploaded = 0; Errors = 0 }
+        @{ Uploaded = 3; Errors = 1 }
+        @{ Uploaded = 3; Errors = 2 }
+    ) {
+        $job = [pscustomobject]@{
+            Entries = @([pscustomobject]@{
+                Path = 'C:\Reports & exports'; LinkPath = '\\server\C$\Reports & exports'
+                Name = 'Custom label'; Destination = 'Published/report.txt'; WebUrl = 'https://example.com/report.txt'
+            })
+            Description = 'Upload folder contents, including subfolders'
+            Uploaded = $Uploaded; Errors = $Errors; Copied = 2; Removed = 1
+        }
+        $html = Build-MailJobRowHC $job
+        $html | Should -BeLike '*C:\Reports &amp; exports</a>*'
+        $html | Should -BeLike '*file://server/C$/Reports%20&amp;%20exports*'
+        $html | Should -BeLike "*$Uploaded&nbsp;uploaded*"
+        $html | Should -Not -Match 'Custom label|Published/report|example.com|Upload folder contents|copied|removed|status-cell|roundrect|&#9679;'
+        if ($Errors) {
+            $label = if ($Errors -eq 1) { 'error' } else { 'errors' }
+            $html | Should -BeLike "*$Errors&nbsp;$label</td>*"
+        }
+        else { $html | Should -Not -Match '&nbsp;errors?' }
+    }
+
+    It 'keeps a multi-server input task together without combining separate tasks' {
+        $tasks = @(
+            [pscustomobject]@{ TaskIndex = 0; ComputerName = 'localhost'; Path = '\\filesA\share\One'; UploadType = 'Folder' }
+            [pscustomobject]@{ TaskIndex = 0; ComputerName = 'localhost'; Path = '\\filesB\share\Two'; UploadType = 'Folder' }
+            [pscustomobject]@{ TaskIndex = 1; ComputerName = 'localhost'; Path = '\\filesA\share\Three'; UploadType = 'Folder' }
+        )
+        $jobs = @(Get-UploadMailJobsHC -Tasks $tasks -Results @())
+        $jobs.Count | Should -Be 2
+        $jobs[0].ComputerName | Should -Be 'filesA, filesB'
+        $jobs[0].Entries.Count | Should -Be 2
+        $jobs[1].Entries.Count | Should -Be 1
+    }
+
+    It 'encodes result text while preserving the configured HTML body' {
+        $settings.ScriptName = 'Upload <script>alert(1)</script>'
+        $settings.SendMail.Body = '<p id="custom-note">Configured note</p>'
+        $row.Name = '<b>Report & label</b>'
+        $row.Source = 'C:\Exports\a & #%.txt'
+        $row.Destination = '<report>.txt'
+        $row.Error = '<img src=x onerror=alert(1)>'
+        $row | Add-Member -NotePropertyName WebUrl -NotePropertyValue 'javascript:alert(1)'
+        $systemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = 'System <failure>' })
+        Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
+        $systemErrors.Count | Should -Be 1
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Body.Contains('&lt;script&gt;') -and $Body.Contains('C:\Exports\a &amp; #%.txt') -and
+            -not $Body.Contains('Report &amp; label') -and -not $Body.Contains('&lt;report&gt;.txt') -and -not $Body.Contains('&lt;img src=x onerror=alert(1)&gt;') -and
+            -not $Body.Contains('System &lt;failure&gt;') -and $Body.Contains('<p id="custom-note">Configured note</p>') -and
+            -not $Body.Contains('href=''javascript:') -and -not $Body.Contains('<script>')
+        }
+        ConvertTo-FileUrlHC '\\server\share\a #%.txt' | Should -Be 'file://server/share/a%20%23%25.txt'
+    }
+
+    It 'uses the grey page, white computer cards, Outlook width and timing footer' {
+        Send-UploadReportHC $settings @($row) $systemErrors ([datetime]'2026-10-06T10:00:00') 'Test'
+        $systemErrors.Count | Should -Be 0
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Body.Contains('class="mail-root"') -and $Body.Contains('bgcolor="#e5e7eb"') -and
+            $Body.Contains('bgcolor="#ffffff"') -and $Body.Contains('width="620"') -and
+            $Body.Contains('max-width:900px') -and $Body.Contains('Started') -and
+            $Body.Contains('Ended') -and $Body.Contains('Duration') -and
+            -not $Body.Contains('Open log folder') -and -not $Body.Contains('view it in the browser')
+        }
+    }
+
+    It 'shows a zero-upload configured task without creating an Excel attachment' {
+        $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $tasks = @([pscustomobject]@{ TaskIndex = 0; ComputerName = 'SERVER1'; Name = 'Empty source'; Path = 'C:\Empty'; UploadType = 'Folder' })
+        Send-UploadReportHC $settings @() $systemErrors (Get-Date) 'Test' -Tasks $tasks
+        $systemErrors.Count | Should -Be 0
+        @(Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx').Count | Should -Be 0
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Subject -eq '0 uploaded, 0 errors' -and $Body.Contains('C:\Empty') -and -not $Body.Contains('Empty source') -and
+            $Body.Contains('0&nbsp;uploaded') -and -not $Body.Contains('No tasks were executed.') -and -not $Attachments
+        }
+    }
+
+    It 'renders only the system-error count above task results and handles no executed tasks' {
+        $systemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = 'Configuration failed' })
+        Send-UploadReportHC $settings @() $systemErrors (Get-Date) 'Test'
+        $systemErrors.Count | Should -Be 1
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Subject -eq '0 uploaded, 1 errors' -and $Priority -eq 'High' -and
+            $Body.Contains('System Errors (1)') -and $Body.Contains('No tasks were executed.') -and
+            -not $Body.Contains('Configuration failed') -and
+            $Body.IndexOf('System Errors (1)') -lt $Body.IndexOf('No tasks were executed.')
+        }
+    }
+
+    It 'still sends mail without a browser link when saving HTML fails' {
+        $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $setContentCommand = Get-Command Set-Content -CommandType Cmdlet
+        Mock Set-Content { & $setContentCommand @PesterBoundParameters }
+        Mock Set-Content { throw 'HTML file is locked' } -ParameterFilter { $LiteralPath -like '* - Mail.html' }
+        Send-UploadReportHC $settings @($row) $systemErrors (Get-Date) 'Test'
+        $systemErrors.Count | Should -Be 1
+        $systemErrors[0].Message | Should -BeLike '*Failed saving email HTML*'
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Subject -eq '1 uploaded, 1 errors' -and $Priority -eq 'High' -and
+            $Body.Contains('System Errors (1)') -and -not $Body.Contains('HTML file is locked') -and -not $Body.Contains('view it in the browser') -and $Attachments.Count -eq 1
+        }
+        $json = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '* - System errors log.json'
+        (Get-Content -LiteralPath $json.FullName -Raw | ConvertFrom-Json).Message | Should -BeLike '*Failed saving email HTML*'
     }
 
     It 'records SMTP failures as system errors' {
@@ -760,7 +912,10 @@ Describe 'Upload reporting' {
         finally { $package.Dispose() }
         $html = $files | Where-Object Extension -eq '.html'
         $script:expectedHtml = Get-Content $html.FullName -Raw
-        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter { $Body.TrimEnd() -eq $script:expectedHtml.TrimEnd() -and $Attachments.Count -eq 1 }
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Body -eq $script:expectedHtml -and $Attachments.Count -eq 1 -and
+            $Body.Contains('Open log folder') -and $Body.Contains('view it in the browser') -and $Body.Contains('details in the attachments')
+        }
     }
 
     It 'removes only old generated logs belonging to this script and configuration' {
@@ -797,7 +952,7 @@ Describe 'Upload reporting' {
 
     It 'logs every file result in Excel and only system errors in JSON' {
         $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
-        $settings.SendMail.When = 'Never'
+        $settings.SendMail.When = 'Always'
         $conflict = [pscustomobject]@{
             ComputerName = 'localhost'; Name = 'Reports'; Source = 'C:\Exports\existing.txt'; Destination = 'Reports/existing.txt'
             Uploaded = $false; CopiedTo = ''; Removed = $false; Error = 'SharePoint file already exists and overwriting is disabled.'
@@ -820,6 +975,15 @@ Describe 'Upload reporting' {
         $errorRows.Error | Should -Contain $conflict.Error
         $errorRows.Error | Should -Contain $copyError.Error
         $errorRows.Error | Should -Not -Contain 'Configuration failure'
+        Should -Invoke Send-MailKitMessageHC -Times 1 -ParameterFilter {
+            $Subject -eq '2 uploaded, 3 errors' -and $Body.Contains('2 Uploaded') -and
+            $Body.Contains('3 Errors') -and $Body.Contains('2&nbsp;uploaded') -and $Body.Contains('2&nbsp;errors') -and
+            $Body.Contains('System Errors (1)') -and -not $Body.Contains('Configuration failure') -and
+            -not $Body.Contains('Archive already exists') -and -not $Body.Contains('SharePoint file already exists')
+        }
+        $html = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '* - Mail.html'
+        $htmlText = Get-Content -LiteralPath $html.FullName -Raw
+        $htmlText | Should -Not -Match 'Configuration failure|Archive already exists|SharePoint file already exists'
         $json = Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '* - System errors log.json'
         $text = Get-Content $json.FullName -Raw
         $errors = @($text | ConvertFrom-Json)

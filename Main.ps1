@@ -24,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 $started = Get-Date
 $systemErrors = [Collections.Generic.List[object]]::new()
 $results = @()
+$tasks = @()
 $settings = $null
 $configurationName = [IO.Path]::GetFileNameWithoutExtension($ConfigurationJsonFile)
 try {
@@ -85,7 +86,7 @@ try {
 }
 catch { $systemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = "$($_.Exception.Message)" }) }
 
-try { Send-UploadReportHC -Settings $settings -Results $results -SystemErrors $systemErrors -Started $started -ConfigurationName $configurationName }
+try { Send-UploadReportHC -Settings $settings -Results $results -SystemErrors $systemErrors -Started $started -ConfigurationName $configurationName -Tasks $tasks }
 catch { $systemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = "Reporting failed: $_" }) }
 $results
 foreach ($failure in $systemErrors) { Write-Warning $failure.Message }

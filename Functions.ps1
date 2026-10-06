@@ -776,13 +776,296 @@ function ConvertTo-UploadConfigurationHC {
     $prepared.ToArray()
 }
 
+function Get-MailThemeHC {
+    @{
+        StatusError = '#fee2e2'; AccentError = '#dc2626'; AccentSuccess = '#16a34a'
+        AccentIdle = '#6b7280'; AccentSystem = '#7c2d12'
+        GradError = @('#7f1d1d', '#dc2626'); GradSuccess = @('#14532d', '#16a34a')
+        GradIdle = @('#374151', '#6b7280')
+        TextMain = '#111827'; TextMuted = '#374151'; TextLight = '#6b7280'
+        BgPage = '#e5e7eb'; BgWhite = '#ffffff'; BorderMain = '#d1d5db'; BorderLight = '#e5e7eb'
+        LinkColor = '#2563eb'; BodyWidth = 620
+        FontStack = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+        MonoStack = 'Consolas, Menlo, monospace'
+    }
+}
+
+function New-PillHtmlHC {
+    param ([string]$Text, [string]$Bg, [string]$Color = '#ffffff')
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $encoded = [System.Net.WebUtility]::HtmlEncode($Text)
+    $upper = [System.Net.WebUtility]::HtmlEncode($Text.ToUpperInvariant())
+    $width = [int][Math]::Ceiling(($Text.Length * 8.5) + 26)
+    $span = "<span style=`"display:inline-block; padding:3px 10px; background-color:$Bg; color:$Color; border-radius:12px; font-size:11px; font-weight:700; letter-spacing:0; text-transform:uppercase; line-height:1.6;`">$encoded</span>"
+    $vml = "<v:roundrect xmlns:v=`"urn:schemas-microsoft-com:vml`" xmlns:w=`"urn:schemas-microsoft-com:office:word`" arcsize=`"50%`" fillcolor=`"$Bg`" stroked=`"f`" style=`"height:26px; width:${width}px; v-text-anchor:middle; mso-padding-alt:0;`">" +
+        '<w:anchorlock/>' +
+        "<center style=`"color:$Color; font-family:sans-serif; font-size:11px; font-weight:700; letter-spacing:0;`">$upper</center></v:roundrect>"
+    "<!--[if mso]>$vml<![endif]--><!--[if !mso]><!-->$span<!--<![endif]-->"
+}
+
+function Build-MailSummaryBannerHC {
+    param ([int]$Uploaded, [int]$Errors)
+
+    $theme = Get-MailThemeHC
+    $color = if ($Uploaded) { $theme.AccentSuccess } else { $theme.AccentIdle }
+    $pills = "<td valign='middle' style='vertical-align:middle; padding:4px 6px 4px 0; white-space:nowrap; font-size:0;'>$(New-PillHtmlHC -Text "$Uploaded Uploaded" -Bg $color)</td>"
+    if ($Errors) {
+        $label = "$Errors Error" + $(if ($Errors -ne 1) { 's' })
+        $pills += "<td valign='middle' style='vertical-align:middle; padding:4px 6px 4px 0; white-space:nowrap; font-size:0;'>$(New-PillHtmlHC -Text $label -Bg $theme.AccentError)</td>"
+    }
+    @"
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse; margin:0 0 16px 0;">
+    <tr><td style="padding:0;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+            <tr><td valign="middle" style="vertical-align:middle; padding:4px 12px 4px 0; font-size:13px; font-weight:600; color:$($theme.TextMain);">Summary</td>$pills</tr>
+        </table>
+    </td></tr>
+</table>
+<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td height="16" style="font-size:0; line-height:16px; mso-line-height-rule:exactly;">&#160;</td></tr></table><![endif]-->
+"@
+}
+
+function ConvertTo-FileUrlHC {
+    param ([string]$Path)
+
+    $uri = $null
+    if ([Uri]::TryCreate($Path, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) { $uri.AbsoluteUri }
+    else { '' }
+}
+
+function Get-TaskDescriptionHC {
+    param ([pscustomobject]$Task)
+
+    $description = if ($Task.UploadType -eq 'File') { 'Upload file' }
+    elseif ($Task.UploadType -eq 'Folder') { 'Upload folder contents' }
+    else { 'Upload files' }
+    if ($Task.UploadType -eq 'Folder' -and $Task.Recurse) { $description += ', including subfolders' }
+    if ($Task.SharePoint.SiteUrl) {
+        $destination = (@($Task.SharePoint.SiteUrl.TrimEnd('/'), $Task.SharePoint.DocumentLibraryName, $Task.SharePoint.FolderPath) | Where-Object { $_ }) -join '/'
+        $description += " to $destination"
+    }
+    if ($Task.SharePointFileName) { $description += " as '$($Task.SharePointFileName)'" }
+    if ($Task.AfterUpload.CopyToFolder) { $description += ", copy to $($Task.AfterUpload.CopyToFolder)" }
+    if ($Task.AfterUpload.RemoveFile) { $description += ', then remove the source' }
+    $excluded = @()
+    foreach ($property in 'Folders', 'Files') {
+        $count = @($Task.Exclude.$property | Where-Object { $_ }).Count
+        if ($count) { $excluded += "$count $($property.ToLowerInvariant())" }
+    }
+    if ($Task.Exclude.Attributes) { $excluded += ($Task.Exclude.Attributes -join '/') + ' items' }
+    if ($excluded) { $description += ', excluding ' + ($excluded -join ' and ') }
+    $description
+}
+
+function Get-UploadMailJobsHC {
+    param ([object[]]$Tasks = @(), [object[]]$Results = @())
+
+    $groups = if ($Tasks.Count) {
+        foreach ($group in ($Tasks | Group-Object TaskIndex)) {
+            $taskIndex = $group.Group[0].TaskIndex
+            [pscustomobject]@{ Sources = $group.Group; Results = @($Results | Where-Object { $_.TaskIndex -eq $taskIndex }) }
+        }
+    }
+    else {
+        foreach ($group in ($Results | Group-Object ComputerName, TaskIndex, Name)) {
+            $sources = $group.Group | Select-Object ComputerName, Name, @{ Name = 'Path'; Expression = { $_.Source } }, Destination, WebUrl -Unique
+            [pscustomobject]@{ Sources = @($sources); Results = $group.Group }
+        }
+    }
+    foreach ($group in $groups) {
+        $entries = @(
+            foreach ($source in $group.Sources) {
+                $computer = $source.ComputerName
+                $linkPath = $source.Path
+                if ($source.Path -match '^\\\\([^\\]+)') { $computer = $Matches[1] }
+                elseif ($source.Path -match '^[A-Za-z]:\\' -and $computer) {
+                    $linkComputer = if ($computer -in 'localhost', '.') { $env:COMPUTERNAME } else { $computer }
+                    $linkPath = $source.Path -replace '^(.):', ('\\{0}\$1$' -f $linkComputer)
+                }
+                [pscustomobject]@{
+                    ComputerName = $computer; Name = $source.Name; Path = $source.Path; LinkPath = $linkPath
+                    Destination = $source.Destination; WebUrl = $source.WebUrl
+                }
+            }
+        )
+        [pscustomobject]@{
+            ComputerName = ($entries.ComputerName | Sort-Object -Unique) -join ', '
+            Entries = $entries; Path = $entries[0].Path
+            Description = (($group.Sources | ForEach-Object { Get-TaskDescriptionHC $_ }) | Select-Object -Unique) -join '; '
+            Uploaded = @($group.Results | Where-Object Uploaded).Count
+            Copied = @($group.Results | Where-Object CopiedTo).Count
+            Removed = @($group.Results | Where-Object Removed).Count
+            Errors = @($group.Results | Where-Object Error).Count
+        }
+    }
+}
+
+function Build-MailSystemErrorsBlockHC {
+    param ([string[]]$Message)
+
+    $messages = @($Message | Where-Object { $_ })
+    if (-not $messages.Count) { return '' }
+    $theme = Get-MailThemeHC
+    @"
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse; margin:0 0 20px 0; table-layout:fixed;">
+    <tr><td style="padding:0 0 8px 0; font-size:11px; font-weight:700; color:$($theme.TextLight); text-transform:uppercase;">System Errors ($($messages.Count))</td></tr>
+</table>
+<!--[if mso]><table role="presentation" width="100%"><tr><td height="12" style="font-size:0; line-height:12px; mso-line-height-rule:exactly;">&#160;</td></tr></table><![endif]-->
+"@
+}
+
+function Build-MailJobRowHC {
+    param ([pscustomobject]$Job)
+
+    $theme = Get-MailThemeHC
+    $accent = if ($Job.Errors) { $theme.AccentError } elseif ($Job.Uploaded) { $theme.AccentSuccess } else { $theme.AccentIdle }
+    $titleHtml = @(foreach ($entry in $Job.Entries) {
+        $href = [System.Net.WebUtility]::HtmlEncode((ConvertTo-FileUrlHC $entry.LinkPath))
+        $path = [System.Net.WebUtility]::HtmlEncode($entry.Path)
+        $title = if ($href) { "<a href='$href' target='_blank' rel='noopener noreferrer' style='color:$($theme.TextMain); text-decoration:none;'>$path</a>" } else { $path }
+        "<div style='margin:0; font-weight:700; color:$($theme.TextMain); font-size:13px; line-height:16px; mso-line-height-rule:exactly; overflow-wrap:anywhere; word-break:break-all;'>$title</div>"
+    }) -join ''
+    $resultText = '{0}&nbsp;uploaded' -f $Job.Uploaded
+    if ($Job.Errors) { $resultText += '<br>{0}&nbsp;error{1}' -f $Job.Errors, $(if ($Job.Errors -ne 1) { 's' }) }
+    @"
+<table class="task-row" role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate; margin:0 0 4px 0; table-layout:fixed; background-color:$($theme.BgWhite); border:1px solid $($theme.BorderMain); border-left:3px solid $accent; border-radius:6px;">
+    <tr><td class="task-content" valign="middle" style="padding:8px 12px;">$titleHtml</td>
+    <td class="task-result" valign="middle" align="right" width="90" style="padding:8px 12px; color:$($theme.TextMuted); font-size:11px; line-height:15px; mso-line-height-rule:exactly; white-space:nowrap;">$resultText</td></tr>
+</table>
+"@
+}
+
+function Build-MailComputerCardHC {
+    param ([string]$ComputerName, [pscustomobject[]]$Job)
+
+    $theme = Get-MailThemeHC
+    $uploaded = ($Job | Measure-Object -Property Uploaded -Sum).Sum
+    $errors = ($Job | Measure-Object -Property Errors -Sum).Sum
+    $symbol, $gradient = if ($errors) { '&#10006;', $theme.GradError }
+    elseif ($uploaded) { '&#10003;', $theme.GradSuccess }
+    else { '&#8211;', $theme.GradIdle }
+    $gradFrom, $gradTo = $gradient
+    $gradMid = '#' + ((0, 2, 4 | ForEach-Object {
+        '{0:x2}' -f [int][Math]::Round((
+            [Convert]::ToInt32($gradFrom.Substring(1 + $_, 2), 16) +
+            [Convert]::ToInt32($gradTo.Substring(1 + $_, 2), 16)
+        ) / 2)
+    }) -join '')
+    $headerLabel = '{0}&nbsp;uploaded' -f $uploaded
+    if ($errors) { $headerLabel += ' &middot; {0}&nbsp;error{1}' -f $errors, $(if ($errors -ne 1) { 's' }) }
+    $rows = ($Job | Sort-Object @{ Expression = { if ($_.Errors) { 0 } elseif ($_.Uploaded) { 1 } else { 2 } } }, Path, Description |
+        ForEach-Object { Build-MailJobRowHC $_ }) -join '<!--[if mso]><table role="presentation" width="100%" bgcolor="#ffffff"><tr><td height="4" style="font-size:0; line-height:4px; mso-line-height-rule:exactly;">&#160;</td></tr></table><![endif]-->'
+    $pathCount = @($Job.Entries.Path | Sort-Object -Unique).Count
+    @"
+<table class="computer-card" role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="$($theme.BgWhite)" style="border-collapse:separate; margin:0 0 16px 0; table-layout:fixed; background-color:$($theme.BgWhite); border:1px solid $($theme.BorderLight); border-radius:10px; overflow:hidden; box-shadow:0 2px 4px rgba(0,0,0,0.06);">
+    <tr><td bgcolor="$gradMid" style="padding:0; background-color:$gradMid; background-image:linear-gradient(135deg, $gradFrom 0%, $gradTo 100%);">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse; table-layout:fixed;">
+            <tr><td valign="middle" align="center" width="52" style="padding:12px 0; font-size:18px; font-weight:bold; color:#ffffff; line-height:24px;">$symbol</td>
+            <td valign="middle" style="padding:12px 8px 12px 0; overflow-wrap:anywhere; word-break:break-word;"><p style="margin:0; font-size:16px; font-weight:700; color:#ffffff; line-height:20px;">$([System.Net.WebUtility]::HtmlEncode($ComputerName))</p><p style="margin:2px 0 0 0; font-size:12px; color:#f1f2f4; line-height:17px;">$pathCount path$(if ($pathCount -ne 1) { 's' })</p></td>
+            <td class="computer-total" valign="middle" align="right" width="140" style="padding:12px 14px 12px 6px; font-size:12px; font-weight:700; color:#e5e7eb; text-transform:uppercase;">$headerLabel</td></tr>
+        </table>
+    </td></tr>
+    <tr><td class="card-content" style="padding:12px 16px;">$rows</td></tr>
+</table>
+<!--[if mso]><table role="presentation" width="100%"><tr><td height="16" style="font-size:0; line-height:16px; mso-line-height-rule:exactly;">&#160;</td></tr></table><![endif]-->
+"@
+}
+
+function Get-MailBodyHtmlHC {
+    param (
+        [string]$ScriptName, [string]$Body, [pscustomobject[]]$Job = @(),
+        [int]$Uploaded, [int]$Errors, [string[]]$SystemError,
+        [string]$LogFolderPath, [bool]$HasAttachments,
+        [datetime]$ScriptStartTime, [datetime]$ScriptEndTime = (Get-Date), [string]$BrowserViewFilePath
+    )
+
+    $theme = Get-MailThemeHC
+    $banner = Build-MailSummaryBannerHC -Uploaded $Uploaded -Errors $Errors
+    $systemErrorsBlock = Build-MailSystemErrorsBlockHC $SystemError
+    $cards = $Job | Group-Object ComputerName | Sort-Object @{
+        Expression = {
+            if (($_.Group | Measure-Object Errors -Sum).Sum) { 0 }
+            elseif (($_.Group | Measure-Object Uploaded -Sum).Sum) { 1 }
+            else { 2 }
+        }
+    }, Name | ForEach-Object { Build-MailComputerCardHC -ComputerName $_.Name -Job $_.Group }
+    $linkStyle = "color:$($theme.LinkColor); text-decoration:none; font-weight:600;"
+    $browserViewRow = ''
+    if ($BrowserViewFilePath) {
+        $browserUrl = [System.Net.WebUtility]::HtmlEncode((ConvertTo-FileUrlHC $BrowserViewFilePath))
+        $browserTitle = [System.Net.WebUtility]::HtmlEncode($BrowserViewFilePath)
+        $browserViewRow = "<!--[if mso]><tr><td style='padding:0 0 8px 0; font-size:12px; color:$($theme.TextMuted);'>If this mail is not visible, please <a href='$browserUrl' title='$browserTitle' style='$linkStyle'>click here to view it in the browser</a>.</td></tr><![endif]-->"
+    }
+    $links = @()
+    if ($LogFolderPath) {
+        $folderPath = [System.Net.WebUtility]::HtmlEncode($LogFolderPath)
+        $folderUrl = [System.Net.WebUtility]::HtmlEncode((ConvertTo-FileUrlHC $LogFolderPath))
+        $links += "<!--[if mso]><a href='$folderPath' title='$folderPath' style='$linkStyle'>Open log folder</a><![endif]--><!--[if !mso]><!--><a href='$folderUrl' title='$folderPath' style='$linkStyle'>Open log folder</a><!--<![endif]-->"
+    }
+    if ($HasAttachments) { $links += 'details in the attachments' }
+    $linksBlock = if ($links) { "<p style='margin:0 0 14px 0; font-size:12px; color:$($theme.TextMuted);'>$($links -join ' &middot; ')</p>" }
+    $duration = $ScriptEndTime - $ScriptStartTime
+    $durationText = '{0:00}:{1:00}:{2:00}' -f [int][Math]::Floor($duration.TotalHours), $duration.Minutes, $duration.Seconds
+    $footer = @"
+<table class="timing" role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; margin:16px auto 0 auto; color:$($theme.TextLight); font-size:11px;">
+    <tr><td style="padding:0 20px 0 0;"><strong>Started</strong> $($ScriptStartTime.ToString('dd/MM/yyyy HH:mm'))</td><td style="padding:0 20px 0 0;"><strong>Ended</strong> $($ScriptEndTime.ToString('dd/MM/yyyy HH:mm'))</td><td><strong>Duration</strong> $durationText</td></tr>
+</table>
+<p style="margin:6px 0 0 0; text-align:center; color:$($theme.TextLight); font-size:11px; font-family:$($theme.MonoStack); overflow-wrap:anywhere;">$([System.Net.WebUtility]::HtmlEncode("$env:USERDNSDOMAIN\$env:USERNAME on $env:COMPUTERNAME, PowerShell $($PSVersionTable.PSVersion)"))</p>
+"@
+    $noJobs = if (-not $cards) { "<p style='margin:0; color:$($theme.TextLight); font-style:italic;'>No tasks were executed.</p>" }
+    @"
+<!DOCTYPE html>
+<html xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!--[if mso]><style type="text/css">v\:* { behavior:url(#default#VML); display:inline-block; } table { mso-table-lspace:0pt; mso-table-rspace:0pt; } td { mso-line-height-rule:exactly; }</style><![endif]-->
+<style type="text/css">
+body { font-family:$($theme.FontStack); font-size:13px; color:$($theme.TextMain); background-color:$($theme.BgPage); margin:0; padding:0; }
+a { color:$($theme.LinkColor); text-decoration:none; }
+h1 { font-size:22px; font-weight:700; color:$($theme.TextMain); margin:0 0 4px 0; overflow-wrap:anywhere; }
+table { border-collapse:collapse; }
+</style>
+<!--[if !mso]><!--><style type="text/css">
+table.mail-root { max-width:900px !important; }
+@media only screen and (max-width:600px) {
+    td.page-padding { padding:12px !important; }
+    td.card-content { padding:8px !important; }
+    td.status-cell { display:none !important; }
+    td.computer-total { width:100px !important; }
+    td.task-result { width:75px !important; }
+    table.timing td { display:block !important; padding:2px 0 !important; text-align:center; }
+}
+</style><!--<![endif]-->
+</head>
+<body style="margin:0; padding:0;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="$($theme.BgPage)" style="background-color:$($theme.BgPage);">
+    <tr><td class="page-padding" align="center" valign="top" bgcolor="$($theme.BgPage)" style="padding:20px;">
+        <!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="$($theme.BodyWidth)" align="center"><tr><td><![endif]-->
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="mail-root" style="width:100%; margin:0 auto; text-align:left; table-layout:fixed;">
+            <tr><td style="padding:0 0 4px 0;"><h1>$([System.Net.WebUtility]::HtmlEncode($ScriptName))</h1></td></tr>
+            <tr><td style="padding:0 0 16px 0; color:$($theme.TextMuted); font-size:13px; line-height:1.6; overflow-wrap:anywhere;">$Body</td></tr>
+            $browserViewRow
+            <tr><td>$linksBlock</td></tr>
+            <tr><td>$banner</td></tr>
+            <tr><td>$systemErrorsBlock</td></tr>
+            <tr><td>$($cards -join '')$noJobs</td></tr>
+            <tr><td>$footer</td></tr>
+        </table>
+        <!--[if mso]></td></tr></table><![endif]-->
+    </td></tr>
+</table>
+</body></html>
+"@
+}
+
 function Send-UploadReportHC {
     [CmdletBinding()]
-    param ($Settings, [object[]]$Results, [Collections.Generic.List[object]]$SystemErrors, [datetime]$Started, [string]$ConfigurationName)
+    param ($Settings, [object[]]$Results, [Collections.Generic.List[object]]$SystemErrors, [datetime]$Started, [string]$ConfigurationName, [object[]]$Tasks = @())
 
     $uploadedCount = @($Results | Where-Object Uploaded).Count
     $itemErrorCount = @($Results | Where-Object Error).Count
     $baseLogName = $null
+    $logFolder = $null
     $attachments = @()
     try {
         $folder = Get-StringValueHC $Settings.SaveLogFiles.Where.Folder
@@ -834,11 +1117,27 @@ function Send-UploadReportHC {
     $shouldSend = $sendMail.When -eq 'Always' -or ($sendMail.When -eq 'OnError' -and $errorCount) -or ($sendMail.When -eq 'OnErrorOrAction' -and ($errorCount -or $uploadedCount))
     if ($shouldSend) {
         try {
-            $title = [System.Net.WebUtility]::HtmlEncode($Settings.ScriptName)
-            $rows = $Results | Select-Object ComputerName, Name, Source, Destination, Uploaded, CopiedTo, Removed, Error | ConvertTo-Html -Fragment
-            $errorsHtml = ($SystemErrors | ForEach-Object { '<li>{0}</li>' -f [System.Net.WebUtility]::HtmlEncode($_.Message) }) -join ''
-            $body = "<html><body><h1>$title</h1><p>$summary</p>$($sendMail.Body)<ul>$errorsHtml</ul>$($rows -join [Environment]::NewLine)</body></html>"
-            if ($baseLogName) { Set-Content -LiteralPath "$baseLogName - Mail.html" -Value $body -Encoding utf8 -ErrorAction Stop }
+            $mailHtmlPath = if ($baseLogName) { "$baseLogName - Mail.html" }
+            $bodyParams = @{
+                ScriptName = $Settings.ScriptName; Body = $sendMail.Body
+                Job = @(Get-UploadMailJobsHC -Tasks $Tasks -Results $Results)
+                Uploaded = $uploadedCount; Errors = $errorCount; SystemError = @($SystemErrors.Message)
+                LogFolderPath = $logFolder; HasAttachments = [bool]$attachments
+                ScriptStartTime = $Started; ScriptEndTime = Get-Date; BrowserViewFilePath = $mailHtmlPath
+            }
+            $body = Get-MailBodyHtmlHC @bodyParams
+            if ($mailHtmlPath) {
+                try { Set-Content -LiteralPath $mailHtmlPath -Value $body -Encoding utf8 -NoNewline -ErrorAction Stop }
+                catch {
+                    $SystemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = "Failed saving email HTML: $_" })
+                    $errorCount = $itemErrorCount + $SystemErrors.Count
+                    $summary = "$uploadedCount uploaded, $errorCount errors"
+                    $bodyParams.Errors = $errorCount
+                    $bodyParams.SystemError = @($SystemErrors.Message)
+                    $bodyParams.BrowserViewFilePath = $null
+                    $body = Get-MailBodyHtmlHC @bodyParams
+                }
+            }
             $mailParams = @{
                 From                = Get-StringValueHC $sendMail.From
                 SmtpServerName      = Get-StringValueHC $sendMail.Smtp.ServerName
