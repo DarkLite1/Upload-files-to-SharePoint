@@ -9,6 +9,8 @@
     do not need a copy of this script folder. They do need the Graph module.
     Task.Exclude groups Attributes (Hidden/System), Folders (subfolder trees),
     and Files (literal file paths). Omitted or empty lists exclude nothing.
+    Task.SharePointFileName optionally overrides the destination name for a
+    selected file, without changing its local or archive filename.
 #>
 [CmdletBinding()]
 param (
@@ -134,7 +136,8 @@ foreach ($sourceFile in $files) {
         $relativeFolder = [IO.Path]::GetDirectoryName($relativePath)
         $targetFolder = (@($Task.SharePoint.FolderPath, $relativeFolder) | Where-Object { $_ }) -join '/'
         $targetFolder = $targetFolder.Replace('\', '/').Trim('/')
-        $result.Destination = (@($targetFolder, $sourceFile.Name) | Where-Object { $_ }) -join '/'
+        $targetFileName = if ($isFile -and $Task.SharePointFileName) { $Task.SharePointFileName } else { $sourceFile.Name }
+        $result.Destination = (@($targetFolder, $targetFileName) | Where-Object { $_ }) -join '/'
         $uploadParams = @{
             FilePath = $sourceFile.FullName
             SiteUrl = $Task.SharePoint.SiteUrl
@@ -145,6 +148,7 @@ foreach ($sourceFile in $files) {
             CertificateThumbprint = $Task.SharePoint.CertificateThumbprint
             Overwrite = [bool]$Task.SharePoint.Overwrite
         }
+        if ($isFile -and $Task.SharePointFileName) { $uploadParams.FileName = $targetFileName }
         foreach ($property in 'MaxRetries', 'ChunkSizeMB') {
             if ($null -ne $Task.SharePoint.$property) { $uploadParams[$property] = $Task.SharePoint.$property }
         }

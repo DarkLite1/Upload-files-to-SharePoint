@@ -58,6 +58,23 @@ Describe 'Upload worker post-upload safety' {
         Test-Path -LiteralPath $sourcePath | Should -BeFalse
     }
 
+    It 'uses a SharePoint filename override without renaming the local or archive file' {
+        $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
+        $task | Add-Member -NotePropertyName SharePointFileName -NotePropertyValue 'Published report.txt'
+        $task.Path = $sourcePath
+        $task.AfterUpload.CopyToFolder = $archive
+        $result = & $worker $task 'param($FileName) if ($FileName -ne "Published report.txt") { throw "Wrong upload filename" }; [pscustomobject]@{ Id="uploaded" }'
+        $result.Error | Should -BeNullOrEmpty
+        $result.Destination | Should -Be 'Reports/Published report.txt'
+        $result.FileName | Should -Be 'report[1].txt'
+        $result.FullName | Should -Be $sourcePath
+        $result.CopiedTo | Should -Be (Join-Path $archive 'report[1].txt')
+        $result.Action | Should -Be 'Uploaded, Copied'
+        Test-Path -LiteralPath $sourcePath | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $source 'Published report.txt') | Should -BeFalse
+        Get-Content -LiteralPath $result.CopiedTo | Should -Be 'report'
+    }
+
     It 'keeps a selected file after an upload failure' {
         $task | Add-Member -NotePropertyName UploadType -NotePropertyValue 'File'
         $task.Path = $sourcePath

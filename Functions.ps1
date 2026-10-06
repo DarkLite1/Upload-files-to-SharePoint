@@ -691,13 +691,24 @@ function ConvertTo-UploadConfigurationHC {
             $entry = $selection.Entry
             $sourceProperty = "$prefix.Upload.$($selection.Kind)"
             $uploadType = if ($selection.Kind -eq 'Files') { 'File' } else { 'Folder' }
+            $sharePointFileName = $null
             if ($entry -is [string]) { $path = $entry; $name = '' }
             elseif ($entry -is [pscustomobject] -and $entry.Path -is [string]) {
                 foreach ($property in $entry.PSObject.Properties.Name) {
-                    if ($property -notin '?', 'Name', 'Path') { throw "Unsupported property '$sourceProperty.$property'." }
+                    if ($property -notin '?', 'Name', 'Path' -and -not ($uploadType -eq 'File' -and $property -eq 'SharePointFileName')) {
+                        throw "Unsupported property '$sourceProperty.$property'."
+                    }
                 }
                 if ($entry.PSObject.Properties.Name -contains 'Name' -and $entry.Name -isnot [string]) {
                     throw "$sourceProperty entry Name must be a string."
+                }
+                if ($entry.PSObject.Properties.Name -contains 'SharePointFileName') {
+                    $sharePointFileName = $entry.SharePointFileName
+                    if ($sharePointFileName -isnot [string] -or [string]::IsNullOrWhiteSpace($sharePointFileName) -or
+                        $sharePointFileName.Length -gt 255 -or $sharePointFileName -match '["*:<>?/\\|\x00-\x1f]' -or
+                        $sharePointFileName.StartsWith('.') -or $sharePointFileName.EndsWith('.') -or $sharePointFileName.Trim() -ne $sharePointFileName) {
+                        throw "$sourceProperty.SharePointFileName must be a nonempty filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace."
+                    }
                 }
                 $path = $entry.Path; $name = $entry.Name
             }
@@ -728,6 +739,7 @@ function ConvertTo-UploadConfigurationHC {
             $prepared.Add([pscustomobject]@{
                     TaskIndex = $taskIndex; ComputerName = $computer; Target = $target; Name = $name
                     Path = $path; UploadType = $uploadType; Recurse = [bool]($uploadType -eq 'Folder' -and $task.Recurse); SharePoint = $task.SharePoint
+                    SharePointFileName = $sharePointFileName
                     Exclude = [pscustomobject]$pathExclusions
                     AfterUpload = [pscustomobject]@{ RemoveFile = [bool]$after.RemoveFile; CopyToFolder = $copyFolder }
                 })

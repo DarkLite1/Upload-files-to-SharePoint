@@ -9,7 +9,7 @@
     AfterUpload can copy and/or remove a source
     file, only after its upload succeeds. With both enabled, copying must
     succeed before removal. Folder jobs preserve relative subfolders when
-    recursing; explicitly selected files use their filename at the destination.
+    recursing; explicit files can override the destination via SharePointFileName.
     Reports errors and exits with code 1 if any upload or reporting step fails.
 .PARAMETER ConfigurationJsonFile
     JSON configuration path, relative to the current working directory or absolute.

@@ -57,6 +57,45 @@ Describe 'Upload configuration and orchestration' {
         $prepared.Recurse | Should -BeFalse
     }
 
+    It 'keeps SharePoint filenames separate from labels and other source selections' {
+        $path = Join-Path $TestDrive 'selected.txt'
+        $config.Tasks[0].Upload.Files = @(
+            [pscustomobject]@{ Path = $path; Name = 'Report label'; SharePointFileName = 'Published report #1%.txt' }
+            (Join-Path $TestDrive 'other.txt')
+        )
+        $prepared = @(ConvertTo-UploadConfigurationHC $config)
+        $prepared.Count | Should -Be 3
+        $prepared[0].SharePointFileName | Should -BeNullOrEmpty
+        $prepared[1].Path | Should -Be $path
+        $prepared[1].Name | Should -Be 'Report label'
+        $prepared[1].SharePointFileName | Should -Be 'Published report #1%.txt'
+        $prepared[2].SharePointFileName | Should -BeNullOrEmpty
+    }
+
+    It 'rejects SharePointFileName on a folder selection' {
+        $config.Tasks[0].Upload.Folders = @([pscustomobject]@{ Path = $source.FullName; SharePointFileName = 'renamed.txt' })
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Unsupported property*SharePointFileName*'
+    }
+
+    It 'rejects invalid SharePointFileName: <Description>' -ForEach @(
+        @{ Description = 'null'; Value = $null }
+        @{ Description = 'number'; Value = 42 }
+        @{ Description = 'empty'; Value = '' }
+        @{ Description = 'whitespace'; Value = ' ' }
+        @{ Description = 'relative path'; Value = '../report.txt' }
+        @{ Description = 'Windows path'; Value = 'folder\report.txt' }
+        @{ Description = 'wildcard'; Value = 'report?.txt' }
+        @{ Description = 'leading dot'; Value = '.report.txt' }
+        @{ Description = 'trailing dot'; Value = 'report.' }
+        @{ Description = 'leading space'; Value = ' report.txt' }
+        @{ Description = 'trailing space'; Value = 'report.txt ' }
+        @{ Description = 'control character'; Value = "report`n.txt" }
+        @{ Description = 'overlong'; Value = ('a' * 256) }
+    ) {
+        $config.Tasks[0].Upload.Files = @([pscustomobject]@{ Path = (Join-Path $TestDrive 'selected.txt'); SharePointFileName = $Value })
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*SharePointFileName*'
+    }
+
     It 'prepares mixed selections as separate folder and file jobs' {
         $path = Join-Path $TestDrive 'selected.txt'
         $config.Tasks[0].Upload.Files = @($path)
@@ -420,7 +459,9 @@ Describe 'Upload configuration and orchestration' {
     It 'sends a <UploadType> job to the remote endpoint and closes the session' -ForEach @('Folder', 'File') {
         $uploadType = $_
         if ($uploadType -eq 'File') {
-            $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(Join-Path $source.FullName 'report.txt') }
+            $config.Tasks[0].Upload = [pscustomobject]@{
+                Files = @([pscustomobject]@{ Path = (Join-Path $source.FullName 'report.txt'); SharePointFileName = 'Published.txt' })
+            }
         }
         $config.Tasks[0].ComputerName = 'SERVER1'
         $config.PSSessionConfiguration = 'Custom.PowerShell7'
@@ -432,7 +473,9 @@ Describe 'Upload configuration and orchestration' {
         $result.Error | Should -Be 'Remote upload failed'
         Should -Invoke New-PSSession -Times 1 -ParameterFilter { $ComputerName -eq 'SERVER1' -and $ConfigurationName -eq 'Custom.PowerShell7' }
         Should -Invoke Invoke-Command -Times 1 -ParameterFilter {
-            $FilePath -like '*Upload files.ps1' -and $ArgumentList[0].UploadType -eq $uploadType -and $ArgumentList[1] -like '*function Send-GraphFileHC*'
+            $FilePath -like '*Upload files.ps1' -and $ArgumentList[0].UploadType -eq $uploadType -and
+            ($uploadType -ne 'File' -or $ArgumentList[0].SharePointFileName -eq 'Published.txt') -and
+            $ArgumentList[1] -like '*function Send-GraphFileHC*'
         }
         Should -Invoke Remove-PSSession -Times 1
         $global:LASTEXITCODE | Should -Be 1
@@ -527,14 +570,82 @@ Describe 'SharePoint overwrite behavior' {
         Should -Invoke Invoke-RestMethod -Times 2 -ParameterFilter { $Method -eq 'PUT' }
     }
 
-    It 'reports an existing destination without retrying or post-upload actions' {
+    It 'uses the configured SharePoint filename for a <Size> upload with <Behavior> conflicts' -ForEach @(
+        @{ Size = 'small'; Overwrite = $false; Behavior = 'fail' }
+        @{ Size = 'small'; Overwrite = $true; Behavior = 'replace' }
+        @{ Size = 'large'; Overwrite = $false; Behavior = 'fail' }
+        @{ Size = 'large'; Overwrite = $true; Behavior = 'replace' }
+    ) {
+        if ($Size -eq 'large') {
+            $stream = [IO.File]::OpenWrite($uploadPath)
+            try { $stream.SetLength(6MB) } finally { $stream.Dispose() }
+        }
+        $targetName = 'Published report #1%.txt'
+        $encodedName = [Uri]::EscapeDataString($targetName)
+        $config = Get-Content "$scriptRoot\Example.json" -Raw | ConvertFrom-Json
+        $config.Tasks = @($config.Tasks[0])
+        $config.Tasks[0].Upload = [pscustomobject]@{
+            Files = @([pscustomobject]@{ Name = 'Report label'; Path = $uploadPath; SharePointFileName = $targetName })
+        }
+        $config.Tasks[0].SharePoint.ClientId = 'client'
+        $config.Tasks[0].SharePoint.TenantId = 'tenant'
+        $config.Tasks[0].SharePoint.CertificateThumbprint = 'cert'
+        $config.Tasks[0].SharePoint.FolderPath = ''
+        $config.Tasks[0].SharePoint.Overwrite = $Overwrite
+        $config.Tasks[0].AfterUpload.RemoveFile = $true
+        $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
+        $config.MaxConcurrent.JobsTotal = 1
+        $config.Settings.SendMail.When = 'Never'
+        $config.Settings.SaveInEventLog.Save = $false
+        $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+        $configurationPath = Join-Path $TestDrive 'rename.json'
+        $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $configurationPath
+        $global:LASTEXITCODE = 0
+        $result = & $main $configurationPath
+        $result.Error | Should -BeNullOrEmpty
+        $result.Destination | Should -Be $targetName
+        $result.Action | Should -Be 'Uploaded, Copied, Removed'
+        $result.CopiedTo | Should -Be (Join-Path $config.Tasks[0].AfterUpload.CopyToFolder 'report.txt')
+        Test-Path -LiteralPath $uploadPath | Should -BeFalse
+        Test-Path -LiteralPath $result.CopiedTo | Should -BeTrue
+        $global:LASTEXITCODE | Should -Be 0
+        if ($Size -eq 'small') {
+            Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+                $Method -eq 'PUT' -and $InputFilePath -eq $uploadPath -and
+                $Uri.AbsoluteUri.EndsWith("/${encodedName}:/content?@microsoft.graph.conflictBehavior=$Behavior")
+            }
+        }
+        else {
+            Should -Invoke Invoke-MgGraphRequest -Times 1 -ParameterFilter {
+                $Method -eq 'POST' -and $Uri.AbsoluteUri.EndsWith("/${encodedName}:/createUploadSession") -and
+                ($Body | ConvertFrom-Json).item.'@microsoft.graph.conflictBehavior' -eq $Behavior
+            }
+            Should -Invoke Invoke-RestMethod -Times 2 -ParameterFilter { $Method -eq 'PUT' }
+        }
+        $excel = Get-ChildItem $config.Settings.SaveLogFiles.Where.Folder -Filter '*.xlsx'
+        $overview = Import-Excel -Path $excel.FullName -WorksheetName 'Overview'
+        $overview.Name | Should -Be 'Report label'
+        $overview.FullName | Should -Be $uploadPath
+        $overview.FileName | Should -Be 'report.txt'
+        $overview.Destination | Should -Be $targetName
+    }
+
+    It 'reports an existing <UploadType> destination without retrying or post-upload actions' -ForEach @(
+        @{ UploadType = 'Folder'; TargetName = 'report.txt' }
+        @{ UploadType = 'File'; TargetName = 'Published.txt' }
+    ) {
         Mock Invoke-MgGraphRequest { throw '409 nameAlreadyExists' } -ParameterFilter { $Method -eq 'PUT' }
         $config = Get-Content "$scriptRoot\Example.json" -Raw | ConvertFrom-Json
+        $conflictSource = New-Item -ItemType Directory (Join-Path $TestDrive ([guid]::NewGuid()))
+        $uploadPath = Join-Path $conflictSource 'report.txt'
+        Set-Content -LiteralPath $uploadPath -Value 'report'
         $task = [pscustomobject]@{
-            TaskIndex = 0; ComputerName = 'localhost'; Name = 'Reports'; Path = $TestDrive; Recurse = $false
+            TaskIndex = 0; ComputerName = 'localhost'; Name = 'Reports'; Path = $conflictSource.FullName; Recurse = $false
+            UploadType = $UploadType; SharePointFileName = $null
             SharePoint = $config.Tasks[0].SharePoint
-            AfterUpload = [pscustomobject]@{ RemoveFile = $true; CopyToFolder = $null }
+            AfterUpload = [pscustomobject]@{ RemoveFile = $true; CopyToFolder = (Join-Path $TestDrive ([guid]::NewGuid())) }
         }
+        if ($UploadType -eq 'File') { $task.Path = $uploadPath; $task.SharePointFileName = $TargetName }
         $task.SharePoint.ClientId = 'client'
         $task.SharePoint.TenantId = 'tenant'
         $task.SharePoint.CertificateThumbprint = 'cert'
@@ -542,9 +653,13 @@ Describe 'SharePoint overwrite behavior' {
         $uploader = Get-Content "$scriptRoot\UploadToSharePoint.ps1" -Raw
         $result = & "$scriptRoot\Upload files.ps1" $task $uploader
         $result.Error | Should -BeLike '*already exists and overwriting is disabled*'
+        $result.Error | Should -BeLike "*$TargetName*"
+        $result.Destination | Should -Be $TargetName
         $result.Uploaded | Should -BeFalse
         $result.Removed | Should -BeFalse
+        $result.CopiedTo | Should -BeNullOrEmpty
         Test-Path -LiteralPath $uploadPath | Should -BeTrue
+        Test-Path -LiteralPath $task.AfterUpload.CopyToFolder | Should -BeFalse
         Should -Invoke Start-Sleep -Times 0
     }
 

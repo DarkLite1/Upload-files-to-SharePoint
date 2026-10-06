@@ -31,11 +31,16 @@
       }
     },
     {
-      "?": "Upload a selected file from a share, archive it after success, then remove the source.",
+      "?": "Upload a selected file under a different SharePoint name, archive it under its original name after success, then remove the source.",
       "ComputerName": null,
       "Upload": {
         "Folders": [],
-        "Files": ["\\\\contoso\\exports\\Invoices\\invoice.csv"]
+        "Files": [
+          {
+            "Path": "\\\\contoso\\exports\\Invoices\\invoice.csv",
+            "SharePointFileName": "Latest invoice.csv"
+          }
+        ]
       },
       "Recurse": false,
       "SharePoint": {
@@ -92,7 +97,7 @@
       "Upload": {
         "?": "Required object. Select at least one source across Folders and Files. Either list may be omitted or empty; null and scalar lists are invalid. Both lists accept absolute local or UNC paths, or objects with Path and optional string Name for reporting. Paths are literal; wildcards are not supported. ENV: values resolve on the script host. Duplicate and overlapping sources on the same computer are rejected, including explicit files inside selected folders.",
         "Folders": "Upload the contents of these folders. Recurse controls subfolder traversal and relative paths. Each selected folder is one job.",
-        "Files": "Upload only these specific files, without enumerating their parent folders. Each file is one job and uses its filename directly inside SharePoint.FolderPath and CopyToFolder. Name is a report label, not a destination filename."
+        "Files": "Upload only these specific files, without enumerating their parent folders. Each file is one job. String entries keep their original filename. Object entries accept Path, optional Name (report label), and optional SharePointFileName (destination filename, including its desired extension). SharePointFileName affects only the upload inside SharePoint.FolderPath; local and CopyToFolder filenames stay unchanged. Omit it to keep the original name. If provided, it must be a nonempty literal filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace. SharePoint.Overwrite applies to the resulting destination name. Folder entries do not support this option."
       },
       "Recurse": "Boolean required when Upload.Folders is nonempty; optional for file-only tasks. Applies only to Upload.Folders. true preserves relative subfolders in SharePoint and in CopyToFolder; false uploads only files directly in each selected folder. Hidden/system files are included unless excluded; directory links are not followed.",
       "Exclude": {
@@ -104,7 +109,7 @@
       "SharePoint": {
         "SiteUrl": "Required HTTPS site URL, not a library or sharing URL.",
         "DocumentLibraryName": "Required library display name. Documents and Shared Documents are accepted aliases.",
-        "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name. Explicitly selected files go here by filename, without their local parent folder path.",
+        "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name. Explicitly selected files go here using SharePointFileName when configured, otherwise their original filename, without their local parent folder path.",
         "Overwrite": "Optional Boolean, default false. true replaces existing SharePoint files. false or omission reports an error if a destination file already exists, and leaves the source untouched. Applies to SharePoint only; existing archive files are never overwritten.",
         "ClientId": "Required app registration client ID, or ENV:VARIABLE_NAME.",
         "TenantId": "Required tenant ID, or ENV:VARIABLE_NAME.",

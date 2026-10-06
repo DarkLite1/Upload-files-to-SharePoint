@@ -55,7 +55,7 @@ For your first run, keep only the first example task and change:
 | --- | --- |
 | `Tasks[].ComputerName` | `localhost` for local files/folders, or `null` for a network share. |
 | `Tasks[].Upload.Folders` | Folders whose contents should be uploaded. Entries can be path strings or objects with `Name` and `Path`. |
-| `Tasks[].Upload.Files` | Specific files to upload. Accepts the same entry format, without uploading other files from their parent folders. |
+| `Tasks[].Upload.Files` | Specific files to upload. Object entries can add `SharePointFileName` to use a different name on SharePoint. Other files in their parent folders are not uploaded. |
 | `Tasks[].Recurse` | Required for folder selections: `true` includes subfolders and preserves their relative paths; `false` selects only direct contents. Optional and unused for file-only tasks. |
 | `Tasks[].Exclude.Attributes` | Optional array: `["Hidden"]`, `["System"]`, or `["Hidden", "System"]` to skip those files and folder trees. Use `[]` or omit the setting to include them. |
 | `Tasks[].Exclude.Folders` | Optional array of absolute subfolder paths to skip with all their contents. |
@@ -79,6 +79,21 @@ Use `Upload.Folders`, `Upload.Files`, or both in each task. For example:
 Either list may be omitted or set to `[]`, but at least one source is required. Paths must be absolute local or UNC paths, without wildcards; `ENV:` paths resolve on the script host. `Name` is an optional report label, not a destination filename. The former top-level `Tasks[].Folders` setting is no longer accepted.
 
 Folder contents go into `SharePoint.FolderPath` without the selected root folder's name; `Recurse: true` preserves subfolders. Explicit files go directly into `SharePoint.FolderPath` by filename. Do not select the same file twice, overlapping folders, or explicit files inside selected folders, even when `Recurse` is false.
+
+To give a selected file a different name on SharePoint, use an object entry:
+
+```json
+"Upload": {
+  "Files": [
+    {
+      "Path": "C:\\Exports\\manifest.csv",
+      "SharePointFileName": "Latest manifest.csv"
+    }
+  ]
+}
+```
+
+`SharePointFileName` is optional and supported only in `Upload.Files`. It is the complete destination filename, including the desired extension, not a folder path. Omit it to keep the original filename. If provided, it must be a nonempty literal filename of at most 255 characters, without invalid SharePoint characters or leading/trailing periods or whitespace. `Name` remains a separate report label. The local file and archive copy keep their original names; Excel's `Destination` shows the SharePoint name. `SharePoint.Overwrite` applies to that destination name. This uploads directly under the chosen name; it does not rename an existing SharePoint item.
 
 Start with `Settings.SendMail.When` set to `Never`, `Settings.SaveInEventLog.Save` set to `false`, and these post-upload settings:
 
