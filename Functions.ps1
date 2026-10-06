@@ -596,7 +596,23 @@ function ConvertTo-UploadConfigurationHC {
         $task = $Configuration.Tasks[$taskIndex]
         $prefix = "Tasks[$taskIndex]"
         foreach ($property in $task.PSObject.Properties.Name) {
-            if ($property -notin '?', 'ComputerName', 'Folders', 'Recurse', 'SharePoint', 'AfterUpload') { throw "Unsupported property '$prefix.$property'." }
+            if ($property -notin '?', 'ComputerName', 'Folders', 'Recurse', 'Exclude', 'SharePoint', 'AfterUpload') { throw "Unsupported property '$prefix.$property'." }
+        }
+        $excludeAttributes = @()
+        if ($task.PSObject.Properties.Name -contains 'Exclude') {
+            if ($task.Exclude -isnot [pscustomobject]) { throw "$prefix.Exclude must be an object." }
+            foreach ($property in $task.Exclude.PSObject.Properties.Name) {
+                if ($property -notin '?', 'Attributes') { throw "Unsupported property '$prefix.Exclude.$property'." }
+            }
+            if ($task.Exclude.PSObject.Properties.Name -contains 'Attributes') {
+                if ($task.Exclude.Attributes -isnot [array]) { throw "$prefix.Exclude.Attributes must be an array containing Hidden and/or System." }
+                foreach ($attribute in $task.Exclude.Attributes) {
+                    if ($attribute -isnot [string] -or $attribute -notin 'Hidden', 'System') {
+                        throw "$prefix.Exclude.Attributes supports only Hidden and System."
+                    }
+                }
+                $excludeAttributes = @($task.Exclude.Attributes | Select-Object -Unique)
+            }
         }
         if ($task.Folders -isnot [array] -or $task.Folders.Count -eq 0) { throw "$prefix.Folders must be a nonempty array." }
         if ($task.Recurse -isnot [bool]) { throw "$prefix.Recurse must be true or false." }
@@ -654,6 +670,7 @@ function ConvertTo-UploadConfigurationHC {
             $prepared.Add([pscustomobject]@{
                 TaskIndex = $taskIndex; ComputerName = $computer; Target = $target; Name = $name
                 Path = $path; Recurse = $task.Recurse; SharePoint = $task.SharePoint
+                Exclude = [pscustomobject]@{ Attributes = $excludeAttributes }
                 AfterUpload = [pscustomobject]@{ RemoveFile = [bool]$after.RemoveFile; CopyToFolder = $copyFolder }
             })
         }

@@ -56,6 +56,7 @@ For your first run, keep only the first example task and change:
 | `Tasks[].ComputerName` | `localhost` for a local folder, or `null` for a network share. |
 | `Tasks[].Folders` | Your source folder paths. Entries can be strings or objects with `Name` and `Path`. |
 | `Tasks[].Recurse` | `true` to include subfolders, preserving their relative paths; otherwise `false`. |
+| `Tasks[].Exclude.Attributes` | Optional array: `["Hidden"]`, `["System"]`, or `["Hidden", "System"]` to skip those files and folder trees. Use `[]` or omit the setting to include them. |
 | `Tasks[].SharePoint` | Your site URL, library name, optional destination `FolderPath`, client ID, tenant ID, and certificate thumbprint. |
 | `Tasks[].SharePoint.Overwrite` | `false` (default) reports an error if the destination file exists. Set to `true` only when you want to replace existing SharePoint files. |
 | `Settings.ScriptName` | A name for your reports and log files. |
@@ -106,6 +107,20 @@ For example, to archive successful uploads and then remove their source files:
 
 Failed uploads never trigger copying or removal. If copying fails, the source stays in place. Existing archive files are not overwritten; a name collision is reported as an error. Missing archive folders are created. Archive folders must be outside all source folders, and source folders must not overlap.
 
+## Exclude Hidden or System Files
+
+Add this to a task to skip both attributes:
+
+```json
+"Exclude": {
+  "Attributes": ["Hidden", "System"]
+}
+```
+
+A file matching either attribute is not uploaded, copied, or removed. A matching folder, including a source folder, is skipped together with everything inside it. Excluded items are not errors and do not appear as uploads in the reports. Access errors on non-excluded items are still reported.
+
+Use only `"Hidden"` or only `"System"` to exclude one attribute. Omit `Exclude`, use `{}`, or set `Attributes` to `[]` to include both. The first example task excludes both attributes.
+
 ## Optional Reporting
 
 - **Log files:** `Settings.SaveLogFiles` controls the log folder and retention. Excel records every file upload and file/task error, including conflicts and failed copying or removal. A separate `System errors log.json` contains only system errors, such as configuration or reporting failures, and is created only when those errors occur. File results are not duplicated in JSON. `DeleteLogsAfterDays: 0` keeps logs indefinitely.
@@ -125,5 +140,5 @@ For network shares, use `ComputerName: null` and UNC paths such as `\\server\sha
 - Existing SharePoint files cause an error unless `SharePoint.Overwrite` is `true`. On a conflict, the source is neither copied nor removed. Missing destination folders are created.
 - Source files you keep are attempted again on the next run. Existing destinations then cause errors unless you enable overwriting. Avoid matching destination filenames across tasks unless overwriting is intended.
 - Files must be finished writing before upload. Do not run overlapping instances against the same source folders.
-- Hidden and system files are included. Folder links are not followed, and linked source folders or files are rejected. Empty folders are not uploaded; local folders are never removed.
+- Hidden and system files are included unless excluded with `Exclude.Attributes`. Folder links are not followed, and linked source folders or files are rejected. Empty folders are not uploaded; local folders are never removed.
 - `MaxConcurrent.JobsTotal` limits simultaneous folder jobs; `JobsPerComputer` limits them per computer or source file server. Files within each folder are processed one at a time.

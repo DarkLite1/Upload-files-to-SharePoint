@@ -51,6 +51,54 @@ Describe 'Upload configuration and orchestration' {
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Overwrite must be true or false*'
     }
 
+    It 'accepts <Description> attribute exclusions' -ForEach @(
+        @{ Description = 'omitted'; Exclude = $null; Omit = $true; Expected = @() }
+        @{ Description = 'empty object'; Exclude = [pscustomobject]@{}; Omit = $false; Expected = @() }
+        @{ Description = 'empty array'; Exclude = [pscustomobject]@{ Attributes = @() }; Omit = $false; Expected = @() }
+        @{ Description = 'Hidden'; Exclude = [pscustomobject]@{ Attributes = @('Hidden') }; Omit = $false; Expected = @('Hidden') }
+        @{ Description = 'System'; Exclude = [pscustomobject]@{ Attributes = @('System') }; Omit = $false; Expected = @('System') }
+        @{ Description = 'both attributes'; Exclude = [pscustomobject]@{ Attributes = @('Hidden', 'System') }; Omit = $false; Expected = @('Hidden', 'System') }
+        @{ Description = 'duplicate attributes'; Exclude = [pscustomobject]@{ Attributes = @('Hidden', 'Hidden') }; Omit = $false; Expected = @('Hidden') }
+    ) {
+        if ($Omit) { $config.Tasks[0].PSObject.Properties.Remove('Exclude') }
+        else { $config.Tasks[0].Exclude = $Exclude }
+        $prepared = ConvertTo-UploadConfigurationHC $config
+        @($prepared.Exclude.Attributes).Count | Should -Be $Expected.Count
+        ($prepared.Exclude.Attributes -join ',') | Should -Be ($Expected -join ',')
+    }
+
+    It 'rejects invalid exclusions: <Description>' -ForEach @(
+        @{ Description = 'null object'; Exclude = $null }
+        @{ Description = 'scalar object'; Exclude = 'Hidden' }
+        @{ Description = 'null array'; Exclude = [pscustomobject]@{ Attributes = $null } }
+        @{ Description = 'scalar attribute'; Exclude = [pscustomobject]@{ Attributes = 'Hidden' } }
+        @{ Description = 'unsupported attribute'; Exclude = [pscustomobject]@{ Attributes = @('ReadOnly') } }
+        @{ Description = 'numeric attribute'; Exclude = [pscustomobject]@{ Attributes = @(2) } }
+        @{ Description = 'null attribute'; Exclude = [pscustomobject]@{ Attributes = @($null) } }
+        @{ Description = 'unknown property'; Exclude = [pscustomobject]@{ Attribute = @('Hidden') } }
+    ) {
+        $config.Tasks[0].Exclude = $Exclude
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Exclude*'
+    }
+
+    It 'passes exclusions to the worker with JobsTotal <JobsTotal>' -ForEach @(
+        @{ JobsTotal = 1 }
+        @{ JobsTotal = 2 }
+    ) {
+        $path = Join-Path $source 'hidden.txt'
+        Set-Content -LiteralPath $path -Value 'protected'
+        [IO.File]::SetAttributes($path, [IO.FileAttributes]::Hidden)
+        $config.MaxConcurrent.JobsTotal = $JobsTotal
+        $config.Tasks[0].Exclude.Attributes = @('Hidden')
+        $config.Tasks[0].AfterUpload.RemoveFile = $true
+        $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
+        $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
+        @(& $main $configPath).Count | Should -Be 0
+        $global:LASTEXITCODE | Should -Be 0
+        Test-Path -LiteralPath $path | Should -BeTrue
+        Test-Path -LiteralPath $config.Tasks[0].AfterUpload.CopyToFolder | Should -BeFalse
+    }
+
     It 'rejects copying inside another source folder' {
         $other = Join-Path $TestDrive 'Other'
         $config.Tasks[0].Folders += $other
