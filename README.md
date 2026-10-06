@@ -93,7 +93,7 @@ To give a selected file a different name on SharePoint, use an object entry:
 }
 ```
 
-`SharePointFileName` is optional and supported only in `Upload.Files`. It is the complete destination filename, including the desired extension, not a folder path. Omit it to keep the original filename. If provided, it must be a nonempty literal filename of at most 255 characters, without invalid SharePoint characters or leading/trailing periods or whitespace. `Name` remains a separate report label. The local file and archive copy keep their original names; Excel's `Destination` shows the SharePoint name. `SharePoint.Overwrite` applies to that destination name. This uploads directly under the chosen name; it does not rename an existing SharePoint item.
+`SharePointFileName` is optional and supported only in `Upload.Files`. It is the complete destination filename, including the desired extension, not a folder path. Omit it or set it to `null`, `""`, or whitespace only to keep the original filename. A nonblank value must be a literal filename of at most 255 characters, without invalid SharePoint characters or leading/trailing periods or whitespace. `Name` remains a separate report label. The local file and archive copy keep their original names; Excel's `Destination` shows the SharePoint name. `SharePoint.Overwrite` applies to that destination name. This uploads directly under the chosen name; it does not rename an existing SharePoint item.
 
 Start with `Settings.SendMail.When` set to `Never`, `Settings.SaveInEventLog.Save` set to `false`, and these post-upload settings:
 

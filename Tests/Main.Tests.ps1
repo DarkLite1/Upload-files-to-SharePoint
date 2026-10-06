@@ -77,11 +77,34 @@ Describe 'Upload configuration and orchestration' {
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Unsupported property*SharePointFileName*'
     }
 
+    It 'keeps the original filename when SharePointFileName is <Description>' -ForEach @(
+        @{ Description = 'omitted'; Omit = $true; Value = $null }
+        @{ Description = 'null'; Omit = $false; Value = $null }
+        @{ Description = 'empty'; Omit = $false; Value = '' }
+        @{ Description = 'spaces'; Omit = $false; Value = '   ' }
+        @{ Description = 'mixed whitespace'; Omit = $false; Value = " `t`r`n " }
+    ) {
+        $path = Join-Path $source.FullName 'original.txt'
+        Set-Content -LiteralPath $path -Value 'report'
+        $entry = [pscustomobject]@{ Path = $path }
+        if (-not $Omit) { $entry | Add-Member -NotePropertyName SharePointFileName -NotePropertyValue $Value }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($entry) }
+        $configuration = $config | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        $prepared = ConvertTo-UploadConfigurationHC $configuration
+        $prepared.SharePointFileName | Should -Be $null
+        $uploader = 'param($FileName) if ($PSBoundParameters.ContainsKey("FileName")) { throw "Filename override must be omitted" }; [pscustomobject]@{ Id="uploaded" }'
+        $result = & "$scriptRoot\Upload files.ps1" $prepared $uploader
+        $result.Error | Should -BeNullOrEmpty
+        $result.Uploaded | Should -BeTrue
+        $result.Destination | Should -Be 'Reports/original.txt'
+        $result.FileName | Should -Be 'original.txt'
+        Test-Path -LiteralPath $path | Should -BeTrue
+    }
+
     It 'rejects invalid SharePointFileName: <Description>' -ForEach @(
-        @{ Description = 'null'; Value = $null }
         @{ Description = 'number'; Value = 42 }
-        @{ Description = 'empty'; Value = '' }
-        @{ Description = 'whitespace'; Value = ' ' }
+        @{ Description = 'Boolean'; Value = $false }
+        @{ Description = 'array'; Value = @() }
         @{ Description = 'relative path'; Value = '../report.txt' }
         @{ Description = 'Windows path'; Value = 'folder\report.txt' }
         @{ Description = 'wildcard'; Value = 'report?.txt' }

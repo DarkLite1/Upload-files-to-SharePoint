@@ -704,10 +704,13 @@ function ConvertTo-UploadConfigurationHC {
                 }
                 if ($entry.PSObject.Properties.Name -contains 'SharePointFileName') {
                     $sharePointFileName = $entry.SharePointFileName
-                    if ($sharePointFileName -isnot [string] -or [string]::IsNullOrWhiteSpace($sharePointFileName) -or
+                    if ($null -eq $sharePointFileName -or ($sharePointFileName -is [string] -and [string]::IsNullOrWhiteSpace($sharePointFileName))) {
+                        $sharePointFileName = $null
+                    }
+                    elseif ($sharePointFileName -isnot [string] -or
                         $sharePointFileName.Length -gt 255 -or $sharePointFileName -match '["*:<>?/\\|\x00-\x1f]' -or
                         $sharePointFileName.StartsWith('.') -or $sharePointFileName.EndsWith('.') -or $sharePointFileName.Trim() -ne $sharePointFileName) {
-                        throw "$sourceProperty.SharePointFileName must be a nonempty filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace."
+                        throw "$sourceProperty.SharePointFileName must be null, blank, or a filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace."
                     }
                 }
                 $path = $entry.Path; $name = $entry.Name
