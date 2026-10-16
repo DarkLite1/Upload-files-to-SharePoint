@@ -6,6 +6,7 @@
     Upload selected files and folder contents to SharePoint document libraries.
 .DESCRIPTION
     Tasks select sources through Upload.Folders and Upload.Files.
+    Each source entry requires Source and a library-relative Destination.
     AfterUpload can copy and/or remove a source
     file, only after its upload succeeds. With both enabled, copying must
     succeed before removal. Folder jobs preserve relative subfolders when

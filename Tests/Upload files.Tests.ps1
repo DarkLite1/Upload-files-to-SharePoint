@@ -12,8 +12,8 @@ Describe 'Upload worker post-upload safety' {
         Set-Content -LiteralPath $sourcePath -Value 'report'
         $task = [pscustomobject]@{
             TaskIndex = 0; ComputerName = 'localhost'; Name = 'Reports'; Path = $source.FullName
-            Recurse = $false
-            SharePoint = [pscustomobject]@{ SiteUrl = 'https://example.com'; DocumentLibraryName = 'Documents'; FolderPath = 'Reports'; ClientId = 'client'; TenantId = 'tenant'; CertificateThumbprint = 'cert' }
+            Recurse = $false; Destination = 'Reports'
+            SharePoint = [pscustomobject]@{ SiteUrl = 'https://example.com'; DocumentLibraryName = 'Documents'; ClientId = 'client'; TenantId = 'tenant'; CertificateThumbprint = 'cert' }
             AfterUpload = [pscustomobject]@{ RemoveFile = $false; CopyToFolder = $null }
         }
     }

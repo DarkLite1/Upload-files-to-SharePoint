@@ -9,6 +9,7 @@
     do not need a copy of this script folder. They do need the Graph module.
     Task.Exclude groups Attributes (Hidden/System), Folders (subfolder trees),
     and Files (literal file paths). Omitted or empty lists exclude nothing.
+    Task.Destination is the library-relative destination folder.
     Task.SharePointFileName optionally overrides the destination name for a
     selected file, without changing its local or archive filename.
 #>
@@ -134,7 +135,7 @@ foreach ($sourceFile in $files) {
         }
         $relativePath = [IO.Path]::GetRelativePath($sourceFolder, $sourceFile.FullName)
         $relativeFolder = [IO.Path]::GetDirectoryName($relativePath)
-        $targetFolder = (@($Task.SharePoint.FolderPath, $relativeFolder) | Where-Object { $_ }) -join '/'
+        $targetFolder = (@($Task.Destination, $relativeFolder) | Where-Object { $_ }) -join '/'
         $targetFolder = $targetFolder.Replace('\', '/').Trim('/')
         $targetFileName = if ($isFile -and $Task.SharePointFileName) { $Task.SharePointFileName } else { $sourceFile.Name }
         $result.Destination = (@($targetFolder, $targetFileName) | Where-Object { $_ }) -join '/'

@@ -2,6 +2,10 @@ BeforeAll {
     $scriptRoot = Split-Path $PSScriptRoot
     . "$scriptRoot\Functions.ps1"
     $main = Join-Path $scriptRoot 'Main.ps1'
+    function New-TestSelection {
+        param ([string]$Source, [AllowEmptyString()][string]$Destination = 'Reports')
+        [pscustomobject]@{ Source = $Source; Destination = $Destination }
+    }
 }
 
 Describe 'Upload configuration and orchestration' {
@@ -13,7 +17,7 @@ Describe 'Upload configuration and orchestration' {
         $config.MaxConcurrent.JobsTotal = 1
         $config.Tasks = @($config.Tasks[0])
         $source = New-Item -ItemType Directory (Join-Path $TestDrive ([guid]::NewGuid()))
-        $config.Tasks[0].Upload.Folders = @($source.FullName)
+        $config.Tasks[0].Upload.Folders = @(New-TestSelection $source.FullName)
         $configPath = Join-Path $TestDrive 'config.json'
         $global:LASTEXITCODE = 0
     }
@@ -41,14 +45,14 @@ Describe 'Upload configuration and orchestration' {
     }
 
     It 'rejects non-Boolean Recurse even for a file-only task' {
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(Join-Path $source.FullName 'report.txt') }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection (Join-Path $source.FullName 'report.txt')) }
         $config.Tasks[0].Recurse = 'false'
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Recurse*'
     }
 
     It 'accepts file-only tasks without Recurse and preserves the optional display name' {
         $path = Join-Path $source.FullName 'report[1].txt'
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Name = 'Selected report'; Path = $path }) }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Name = 'Selected report'; Source = $path; Destination = 'Reports' }) }
         $config.Tasks[0].PSObject.Properties.Remove('Recurse')
         $prepared = ConvertTo-UploadConfigurationHC $config
         $prepared.UploadType | Should -Be 'File'
@@ -60,8 +64,8 @@ Describe 'Upload configuration and orchestration' {
     It 'keeps SharePoint filenames separate from labels and other source selections' {
         $path = Join-Path $TestDrive 'selected.txt'
         $config.Tasks[0].Upload.Files = @(
-            [pscustomobject]@{ Path = $path; Name = 'Report label'; SharePointFileName = 'Published report #1%.txt' }
-            (Join-Path $TestDrive 'other.txt')
+            [pscustomobject]@{ Source = $path; Destination = 'Reports'; Name = 'Report label'; SharePointFileName = 'Published report #1%.txt' }
+            (New-TestSelection (Join-Path $TestDrive 'other.txt'))
         )
         $prepared = @(ConvertTo-UploadConfigurationHC $config)
         $prepared.Count | Should -Be 3
@@ -72,8 +76,121 @@ Describe 'Upload configuration and orchestration' {
         $prepared[2].SharePointFileName | Should -BeNullOrEmpty
     }
 
+    It 'keeps source destinations independent while sharing site settings' {
+        $config.Tasks[0].Upload.Folders = @(
+            (New-TestSelection $source.FullName 'Other/Folder')
+            (New-TestSelection (Join-Path $TestDrive 'OtherSource'))
+        )
+        $config.Tasks[0].Upload.Files = @(
+            [pscustomobject]@{ Source = (Join-Path $TestDrive 'selected.txt'); Destination = 'Other/Files'; SharePointFileName = 'Published.txt' }
+        )
+        $prepared = @(ConvertTo-UploadConfigurationHC $config)
+        $prepared.Destination | Should -Be @('Other/Folder', 'Reports', 'Other/Files')
+        $config.Tasks[0].SharePoint.PSObject.Properties.Name | Should -Not -Contain 'FolderPath'
+        $prepared[2].SharePointFileName | Should -Be 'Published.txt'
+        $prepared[0].Destination = 'Changed'
+        $prepared[1].Destination | Should -Be 'Reports'
+        $prepared[2].Destination | Should -Be 'Other/Files'
+        $config.Tasks[0].Upload.Folders[0].Destination | Should -Be 'Other/Folder'
+    }
+
+    It 'requires Destination for <Selection> when omitted' -ForEach @(
+        @{ Selection = 'Folders' }
+        @{ Selection = 'Files' }
+    ) {
+        $entry = [pscustomobject]@{ Source = $source.FullName }
+        if ($Selection -eq 'Files') { $entry.Source = Join-Path $source.FullName 'report.txt' }
+        $config.Tasks[0].Upload = [pscustomobject]@{ $Selection = @($entry) }
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Destination is required*'
+    }
+
+    It 'rejects the removed shared SharePoint.FolderPath before any workers run' {
+        $config.Tasks[0].SharePoint | Add-Member -NotePropertyName FolderPath -NotePropertyValue 'Legacy'
+        Mock Invoke-WithOptionalParallelismHC { throw 'Workers must not run' }
+        $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
+        & $main $configPath -WarningVariable warnings
+        $global:LASTEXITCODE | Should -Be 1
+        "$warnings" | Should -BeLike '*Unsupported property*SharePoint.FolderPath*'
+        Should -Invoke Invoke-WithOptionalParallelismHC -Times 0 -Exactly
+    }
+
+    It 'uses Destination for <Selection> with result <Expected> and preserves archive layout' -ForEach @(
+        @{ Selection = 'Folders'; Destination = 'Selected/Reports'; Nested = $false; Expected = 'Selected/Reports/report.txt' }
+        @{ Selection = 'Folders'; Destination = 'Selected/Reports'; Nested = $true; Expected = 'Selected/Reports/Sub/report.txt' }
+        @{ Selection = 'Folders'; Destination = ''; Nested = $false; Expected = 'report.txt' }
+        @{ Selection = 'Folders'; Destination = $null; Nested = $false; Expected = 'report.txt' }
+        @{ Selection = 'Folders'; Destination = $null; Nested = $true; Expected = 'Sub/report.txt' }
+        @{ Selection = 'Files'; Destination = 'Selected/Files'; Nested = $false; Expected = 'Selected/Files/Published.txt' }
+        @{ Selection = 'Files'; Destination = ''; Nested = $false; Expected = 'Published.txt' }
+        @{ Selection = 'Files'; Destination = $null; Nested = $false; Expected = 'Published.txt' }
+    ) {
+        $fileFolder = $source.FullName
+        if ($Nested) { $fileFolder = (New-Item -ItemType Directory (Join-Path $source.FullName 'Sub')).FullName }
+        $filePath = Join-Path $fileFolder 'report.txt'
+        Set-Content -LiteralPath $filePath -Value 'report'
+        $entry = [pscustomobject]@{ Source = $source.FullName; Destination = $Destination }
+        if ($Selection -eq 'Files') {
+            $entry.Source = $filePath
+            $entry | Add-Member -NotePropertyName SharePointFileName -NotePropertyValue 'Published.txt'
+        }
+        $config.Tasks[0].Upload = [pscustomobject]@{ $Selection = @($entry) }
+        $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
+        $config.Tasks[0].AfterUpload.RemoveFile = $true
+        $prepared = ConvertTo-UploadConfigurationHC ($config | ConvertTo-Json -Depth 12 | ConvertFrom-Json)
+        if ($null -eq $Destination) { $prepared.Destination | Should -Be $null }
+        $uploader = 'param($FilePath, $FolderPath, $FileName) $name = if ($FileName) { $FileName } else { Split-Path $FilePath -Leaf }; [pscustomobject]@{ Id="uploaded"; WebUrl=(@($FolderPath, $name) | Where-Object { $_ }) -join "/" }'
+        $result = & "$scriptRoot\Upload files.ps1" $prepared $uploader
+        $result.Error | Should -BeNullOrEmpty
+        $result.Destination | Should -Be $Expected
+        $result.WebUrl | Should -Be $Expected
+        $result.Action | Should -Be 'Uploaded, Copied, Removed'
+        $relativeArchive = if ($Nested) { 'Sub\report.txt' } else { 'report.txt' }
+        $result.CopiedTo | Should -Be (Join-Path $config.Tasks[0].AfterUpload.CopyToFolder $relativeArchive)
+        Get-Content -LiteralPath $result.CopiedTo | Should -Be 'report'
+        Test-Path -LiteralPath $filePath | Should -BeFalse
+        $descriptionDestination = (@('Documents', $Destination) | Where-Object { $_ }) -join '/'
+        (Get-TaskDescriptionHC $prepared) | Should -BeLike "*/$descriptionDestination*"
+    }
+
+    It 'rejects invalid Destination: <Description>' -ForEach @(
+        @{ Description = 'number'; Value = 42 }
+        @{ Description = 'Boolean'; Value = $false }
+        @{ Description = 'array'; Value = @('Reports') }
+        @{ Description = 'object'; Value = [pscustomobject]@{ Path = 'Reports' } }
+        @{ Description = 'parent'; Value = '../Reports' }
+        @{ Description = 'Windows parent'; Value = 'Reports\..\Other' }
+        @{ Description = 'current directory'; Value = 'Reports/./Other' }
+        @{ Description = 'whitespace'; Value = " `t " }
+    ) {
+        foreach ($selection in 'Folders', 'Files') {
+            $entry = [pscustomobject]@{ Source = $source.FullName; Destination = $Value }
+            $config.Tasks[0].Upload = [pscustomobject]@{ $selection = @($entry) }
+            { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Destination*'
+        }
+    }
+
+    It 'still rejects duplicate sources with different destinations' {
+        $config.Tasks[0].Upload.Folders = @(
+            (New-TestSelection $source.FullName 'One')
+            (New-TestSelection $source.FullName 'Two')
+        )
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*overlap*'
+    }
+
+    It 'includes each source Destination in mail descriptions' {
+        $config.Tasks[0].Upload.Folders = @(
+            (New-TestSelection $source.FullName 'One')
+            (New-TestSelection (Join-Path $TestDrive 'OtherSource') 'Two')
+        )
+        $prepared = @(ConvertTo-UploadConfigurationHC $config)
+        $mailJobs = @(Get-UploadMailJobsHC -Tasks $prepared)
+        $mailJobs.Count | Should -Be 1
+        $mailJobs[0].Description | Should -BeLike '*/Documents/One*'
+        $mailJobs[0].Description | Should -BeLike '*/Documents/Two*'
+    }
+
     It 'rejects SharePointFileName on a folder selection' {
-        $config.Tasks[0].Upload.Folders = @([pscustomobject]@{ Path = $source.FullName; SharePointFileName = 'renamed.txt' })
+        $config.Tasks[0].Upload.Folders = @([pscustomobject]@{ Source = $source.FullName; Destination = 'Reports'; SharePointFileName = 'renamed.txt' })
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Unsupported property*SharePointFileName*'
     }
 
@@ -86,7 +203,7 @@ Describe 'Upload configuration and orchestration' {
     ) {
         $path = Join-Path $source.FullName 'original.txt'
         Set-Content -LiteralPath $path -Value 'report'
-        $entry = [pscustomobject]@{ Path = $path }
+        $entry = New-TestSelection $path
         if (-not $Omit) { $entry | Add-Member -NotePropertyName SharePointFileName -NotePropertyValue $Value }
         $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($entry) }
         $configuration = $config | ConvertTo-Json -Depth 12 | ConvertFrom-Json
@@ -115,13 +232,13 @@ Describe 'Upload configuration and orchestration' {
         @{ Description = 'control character'; Value = "report`n.txt" }
         @{ Description = 'overlong'; Value = ('a' * 256) }
     ) {
-        $config.Tasks[0].Upload.Files = @([pscustomobject]@{ Path = (Join-Path $TestDrive 'selected.txt'); SharePointFileName = $Value })
+        $config.Tasks[0].Upload.Files = @([pscustomobject]@{ Source = (Join-Path $TestDrive 'selected.txt'); Destination = 'Reports'; SharePointFileName = $Value })
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*SharePointFileName*'
     }
 
     It 'prepares mixed selections as separate folder and file jobs' {
         $path = Join-Path $TestDrive 'selected.txt'
-        $config.Tasks[0].Upload.Files = @($path)
+        $config.Tasks[0].Upload.Files = @(New-TestSelection $path)
         $prepared = @(ConvertTo-UploadConfigurationHC $config)
         $prepared.Count | Should -Be 2
         $prepared.UploadType | Should -Be @('Folder', 'File')
@@ -140,45 +257,66 @@ Describe 'Upload configuration and orchestration' {
         @{ Description = 'null folders'; Upload = [pscustomobject]@{ Folders = $null } }
         @{ Description = 'scalar folders'; Upload = [pscustomobject]@{ Folders = 'C:\Reports' } }
         @{ Description = 'scalar files'; Upload = [pscustomobject]@{ Files = 'C:\report.txt' } }
-        @{ Description = 'blank file'; Upload = [pscustomobject]@{ Files = @(' ') } }
-        @{ Description = 'relative file'; Upload = [pscustomobject]@{ Files = @('report.txt') } }
-        @{ Description = 'wildcard file'; Upload = [pscustomobject]@{ Files = @('C:\*.txt') } }
-        @{ Description = 'wildcard folder'; Upload = [pscustomobject]@{ Folders = @('C:\Reports*') } }
+        @{ Description = 'blank file'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Source = ' '; Destination = '' }) } }
+        @{ Description = 'relative file'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Source = 'report.txt'; Destination = '' }) } }
+        @{ Description = 'wildcard file'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Source = 'C:\*.txt'; Destination = '' }) } }
+        @{ Description = 'wildcard folder'; Upload = [pscustomobject]@{ Folders = @([pscustomobject]@{ Source = 'C:\Reports*'; Destination = '' }) } }
         @{ Description = 'invalid entry'; Upload = [pscustomobject]@{ Files = @(42) } }
-        @{ Description = 'missing Path'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Name = 'Report' }) } }
-        @{ Description = 'invalid Name'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Name = 42; Path = 'C:\report.txt' }) } }
-        @{ Description = 'unknown entry property'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Path = 'C:\report.txt'; Rename = 'other.txt' }) } }
+        @{ Description = 'missing Source'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Destination = ''; Name = 'Report' }) } }
+        @{ Description = 'invalid Name'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Name = 42; Source = 'C:\report.txt'; Destination = '' }) } }
+        @{ Description = 'unknown entry property'; Upload = [pscustomobject]@{ Files = @([pscustomobject]@{ Source = 'C:\report.txt'; Destination = ''; Rename = 'other.txt' }) } }
     ) {
         $config.Tasks[0].Upload = $Upload
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Upload*'
     }
 
+    It 'rejects legacy <Property> on a source entry' -ForEach @('Path', 'FolderPath') {
+        $entry = New-TestSelection $source.FullName
+        $entry | Add-Member -NotePropertyName $_ -NotePropertyValue 'Legacy'
+        foreach ($selection in 'Folders', 'Files') {
+            $config.Tasks[0].Upload = [pscustomobject]@{ $selection = @($entry) }
+            { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Unsupported property*'
+        }
+    }
+
+    It 'rejects string-only <Selection> entries rather than selecting the library root' -ForEach @('Folders', 'Files') {
+        $config.Tasks[0].Upload = [pscustomobject]@{ $_ = @($source.FullName) }
+        { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*objects with Source and Destination*'
+    }
+
+    It 'rejects invalid Source values' -ForEach @($null, '', ' ', 42, $false, @('C:\Reports')) {
+        foreach ($selection in 'Folders', 'Files') {
+            $config.Tasks[0].Upload = [pscustomobject]@{ $selection = @([pscustomobject]@{ Source = $_; Destination = '' }) }
+            { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*Source must be a nonempty path string*'
+        }
+    }
+
     It 'rejects selecting a file also covered by an uploaded folder' {
-        $config.Tasks[0].Upload.Files = @(Join-Path $source.FullName 'report.txt')
+        $config.Tasks[0].Upload.Files = @(New-TestSelection (Join-Path $source.FullName 'report.txt'))
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*overlap*'
     }
 
     It 'rejects duplicate explicit file paths after normalization' {
         $path = Join-Path $source.FullName 'report.txt'
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($path, (Join-Path $source.FullName 'Sub/../REPORT.txt')) }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @((New-TestSelection $path), (New-TestSelection (Join-Path $source.FullName 'Sub/../REPORT.txt'))) }
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*overlap*'
     }
 
     It 'rejects an archive containing an explicitly selected source file' {
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(Join-Path $source.FullName 'report.txt') }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection (Join-Path $source.FullName 'report.txt')) }
         $config.Tasks[0].AfterUpload.CopyToFolder = $source.FullName
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*must not contain a selected source file*'
     }
 
     It 'allows an archive beside a selected file without selecting its parent folder' {
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(Join-Path $source.FullName 'report.txt') }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection (Join-Path $source.FullName 'report.txt')) }
         $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $source.FullName 'Archive'
         (ConvertTo-UploadConfigurationHC $config).AfterUpload.CopyToFolder | Should -Be $config.Tasks[0].AfterUpload.CopyToFolder
     }
 
     It 'routes an explicit UNC file on the script host' {
         $config.Tasks[0].ComputerName = $null
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @('//server/share/Sub/../report[1].txt') }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection '//server/share/Sub/../report[1].txt') }
         $prepared = ConvertTo-UploadConfigurationHC $config
         $prepared.UploadType | Should -Be 'File'
         $prepared.Path | Should -Be '\\server\share\report[1].txt'
@@ -188,7 +326,7 @@ Describe 'Upload configuration and orchestration' {
 
     It 'rejects a remote UNC file to avoid a double hop' {
         $config.Tasks[0].ComputerName = 'SERVER1'
-        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @('\\server\share\report.txt') }
+        $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection '\\server\share\report.txt') }
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*double hop*'
     }
 
@@ -198,7 +336,7 @@ Describe 'Upload configuration and orchestration' {
         $path = Join-Path $source.FullName 'report.txt'
         try {
             [Environment]::SetEnvironmentVariable($variable, $path)
-            $config.Tasks[0].Upload = [pscustomobject]@{ Files = @("ENV:$variable") }
+            $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection "ENV:$variable") }
             (ConvertTo-UploadConfigurationHC $config).Path | Should -Be $path
         }
         finally { [Environment]::SetEnvironmentVariable($variable, $previous) }
@@ -271,7 +409,7 @@ Describe 'Upload configuration and orchestration' {
         $path = Join-Path $source 'hidden.txt'
         Set-Content -LiteralPath $path -Value 'protected'
         [IO.File]::SetAttributes($path, [IO.FileAttributes]::Hidden)
-        if ($Selection -eq 'Files') { $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($path) } }
+        if ($Selection -eq 'Files') { $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection $path) } }
         $config.MaxConcurrent.JobsTotal = $JobsTotal
         $config.Tasks[0].Exclude.Attributes = @('Hidden')
         $config.Tasks[0].AfterUpload.RemoveFile = $true
@@ -292,7 +430,7 @@ Describe 'Upload configuration and orchestration' {
 
     It 'routes each exclusion to its source folder after normalization' {
         $other = Join-Path $TestDrive 'OtherReports'
-        $config.Tasks[0].Upload.Folders += $other
+        $config.Tasks[0].Upload.Folders += New-TestSelection $other
         $config.Tasks[0].Exclude = [pscustomobject]@{
             Folders = @((Join-Path $source 'Unused/../Drafts/').Replace('\', '/'))
             Files = @((Join-Path $other 'status.json').ToUpperInvariant())
@@ -307,7 +445,7 @@ Describe 'Upload configuration and orchestration' {
 
     It 'accepts UNC exclusions below the correct source share' {
         $config.Tasks[0].ComputerName = $null
-        $config.Tasks[0].Upload.Folders = @('\\server\share\Reports')
+        $config.Tasks[0].Upload.Folders = @(New-TestSelection '\\server\share\Reports')
         $config.Tasks[0].Exclude = [pscustomobject]@{
             Folders = @('\\SERVER\share\Reports\Drafts\')
             Files = @('\\server\share\Reports\status.json')
@@ -343,7 +481,7 @@ Describe 'Upload configuration and orchestration' {
         $selection = $_
         $path = Join-Path $source 'protected.txt'
         Set-Content -LiteralPath $path -Value 'protected'
-        if ($selection -eq 'Files') { $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($path) } }
+        if ($selection -eq 'Files') { $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection $path) } }
         $config.Tasks[0].Exclude = [pscustomobject]@{ Files = @($path.ToUpperInvariant().Replace('\', '/')) }
         $config.Tasks[0].AfterUpload.RemoveFile = $true
         $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
@@ -356,13 +494,13 @@ Describe 'Upload configuration and orchestration' {
 
     It 'rejects copying inside another source folder' {
         $other = Join-Path $TestDrive 'Other'
-        $config.Tasks[0].Upload.Folders += $other
+        $config.Tasks[0].Upload.Folders += New-TestSelection $other
         $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $other 'Archive'
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*outside every source*'
     }
 
     It 'rejects overlapping sources' {
-        $config.Tasks[0].Upload.Folders += Join-Path $source 'Sub'
+        $config.Tasks[0].Upload.Folders += New-TestSelection (Join-Path $source 'Sub')
         { ConvertTo-UploadConfigurationHC $config } | Should -Throw '*overlap*'
     }
 
@@ -386,7 +524,7 @@ Describe 'Upload configuration and orchestration' {
         $path = Join-Path $source 'report.txt'
         Set-Content -LiteralPath $path -Value 'report'
         if ($Selection -eq 'Files') {
-            $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($path) }
+            $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection $path) }
             $config.Tasks[0].PSObject.Properties.Remove('Recurse')
         }
         Import-Module Microsoft.Graph.Authentication
@@ -400,7 +538,7 @@ Describe 'Upload configuration and orchestration' {
         $config.Tasks[0].SharePoint.ClientId = 'client'
         $config.Tasks[0].SharePoint.TenantId = 'tenant'
         $config.Tasks[0].SharePoint.CertificateThumbprint = 'cert'
-        $config.Tasks[0].SharePoint.FolderPath = ''
+        foreach ($entry in @($config.Tasks[0].Upload.Folders) + @($config.Tasks[0].Upload.Files) | Where-Object { $_ }) { $entry.Destination = '' }
         $config.Tasks[0].SharePoint.Overwrite = $Overwrite
         $config.Tasks[0].AfterUpload.RemoveFile = $true
         $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
@@ -420,7 +558,7 @@ Describe 'Upload configuration and orchestration' {
     }
 
     It 'fails before execution when a later task is invalid' {
-        $config.Tasks += [pscustomobject]@{ Upload = [pscustomobject]@{ Folders = @('C:\Invalid') }; Recurse = 'false' }
+        $config.Tasks += [pscustomobject]@{ Upload = [pscustomobject]@{ Folders = @(New-TestSelection 'C:\Invalid') }; Recurse = 'false' }
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
         & $main $configPath -WarningVariable warnings
         $global:LASTEXITCODE | Should -Be 1
@@ -428,7 +566,7 @@ Describe 'Upload configuration and orchestration' {
     }
 
     It 'returns a failed result and exit 1 for a missing source' {
-        $config.Tasks[0].Upload.Folders = @(Join-Path $TestDrive 'missing')
+        $config.Tasks[0].Upload.Folders = @(New-TestSelection (Join-Path $TestDrive 'missing'))
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
         $result = & $main $configPath
         $result.Error | Should -Not -BeNullOrEmpty
@@ -444,7 +582,7 @@ Describe 'Upload configuration and orchestration' {
             $excludedPath = Join-Path $source.FullName 'excluded.txt'
             Set-Content -LiteralPath $excludedPath -Value 'excluded report'
             $config.Tasks[0].Exclude.Files = @($excludedPath)
-            if ($DirectFile) { $config.Tasks[0].Upload = [pscustomobject]@{ Files = @($excludedPath) } }
+            if ($DirectFile) { $config.Tasks[0].Upload = [pscustomobject]@{ Files = @(New-TestSelection $excludedPath) } }
         }
         $config.Settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
@@ -470,7 +608,7 @@ Describe 'Upload configuration and orchestration' {
     It 'runs multiple folder jobs in parallel without dropping results' {
         $config.MaxConcurrent.JobsTotal = 3
         $config.MaxConcurrent.JobsPerComputer = 2
-        $config.Tasks[0].Upload.Folders = @(1..5 | ForEach-Object { Join-Path $TestDrive "missing-$_" })
+        $config.Tasks[0].Upload.Folders = @(1..5 | ForEach-Object { New-TestSelection (Join-Path $TestDrive "missing-$_") })
         $config | ConvertTo-Json -Depth 12 | Set-Content $configPath
         $results = @(& $main $configPath)
         $results.Count | Should -Be 5
@@ -481,9 +619,10 @@ Describe 'Upload configuration and orchestration' {
 
     It 'sends a <UploadType> job to the remote endpoint and closes the session' -ForEach @('Folder', 'File') {
         $uploadType = $_
+        $config.Tasks[0].Upload.Folders = @(New-TestSelection $source.FullName 'Remote/Selected')
         if ($uploadType -eq 'File') {
             $config.Tasks[0].Upload = [pscustomobject]@{
-                Files = @([pscustomobject]@{ Path = (Join-Path $source.FullName 'report.txt'); SharePointFileName = 'Published.txt' })
+                Files = @([pscustomobject]@{ Source = (Join-Path $source.FullName 'report.txt'); SharePointFileName = 'Published.txt'; Destination = 'Remote/Selected' })
             }
         }
         $config.Tasks[0].ComputerName = 'SERVER1'
@@ -497,6 +636,7 @@ Describe 'Upload configuration and orchestration' {
         Should -Invoke New-PSSession -Times 1 -ParameterFilter { $ComputerName -eq 'SERVER1' -and $ConfigurationName -eq 'Custom.PowerShell7' }
         Should -Invoke Invoke-Command -Times 1 -ParameterFilter {
             $FilePath -like '*Upload files.ps1' -and $ArgumentList[0].UploadType -eq $uploadType -and
+            $ArgumentList[0].Destination -eq 'Remote/Selected' -and
             ($uploadType -ne 'File' -or $ArgumentList[0].SharePointFileName -eq 'Published.txt') -and
             $ArgumentList[1] -like '*function Send-GraphFileHC*'
         }
@@ -608,12 +748,11 @@ Describe 'SharePoint overwrite behavior' {
         $config = Get-Content "$scriptRoot\Example.json" -Raw | ConvertFrom-Json
         $config.Tasks = @($config.Tasks[0])
         $config.Tasks[0].Upload = [pscustomobject]@{
-            Files = @([pscustomobject]@{ Name = 'Report label'; Path = $uploadPath; SharePointFileName = $targetName })
+            Files = @([pscustomobject]@{ Name = 'Report label'; Source = $uploadPath; Destination = ''; SharePointFileName = $targetName })
         }
         $config.Tasks[0].SharePoint.ClientId = 'client'
         $config.Tasks[0].SharePoint.TenantId = 'tenant'
         $config.Tasks[0].SharePoint.CertificateThumbprint = 'cert'
-        $config.Tasks[0].SharePoint.FolderPath = ''
         $config.Tasks[0].SharePoint.Overwrite = $Overwrite
         $config.Tasks[0].AfterUpload.RemoveFile = $true
         $config.Tasks[0].AfterUpload.CopyToFolder = Join-Path $TestDrive ([guid]::NewGuid())
@@ -664,7 +803,7 @@ Describe 'SharePoint overwrite behavior' {
         Set-Content -LiteralPath $uploadPath -Value 'report'
         $task = [pscustomobject]@{
             TaskIndex = 0; ComputerName = 'localhost'; Name = 'Reports'; Path = $conflictSource.FullName; Recurse = $false
-            UploadType = $UploadType; SharePointFileName = $null
+            UploadType = $UploadType; SharePointFileName = $null; Destination = ''
             SharePoint = $config.Tasks[0].SharePoint
             AfterUpload = [pscustomobject]@{ RemoveFile = $true; CopyToFolder = (Join-Path $TestDrive ([guid]::NewGuid())) }
         }
@@ -672,7 +811,6 @@ Describe 'SharePoint overwrite behavior' {
         $task.SharePoint.ClientId = 'client'
         $task.SharePoint.TenantId = 'tenant'
         $task.SharePoint.CertificateThumbprint = 'cert'
-        $task.SharePoint.FolderPath = ''
         $uploader = Get-Content "$scriptRoot\UploadToSharePoint.ps1" -Raw
         $result = & "$scriptRoot\Upload files.ps1" $task $uploader
         $result.Error | Should -BeLike '*already exists and overwriting is disabled*'
@@ -1006,7 +1144,7 @@ Describe 'Upload reporting' {
         $config = Get-Content "$scriptRoot\Example.json" -Raw | ConvertFrom-Json
         $task = [pscustomobject]@{
             TaskIndex = 0; ComputerName = 'localhost'; Name = '000123'; Path = $sourceFolder.FullName
-            Recurse = $false; SharePoint = $config.Tasks[0].SharePoint
+            Recurse = $false; Destination = 'Reports'; SharePoint = $config.Tasks[0].SharePoint
             AfterUpload = [pscustomobject]@{ RemoveFile = $true; CopyToFolder = (Join-Path $TestDrive ([guid]::NewGuid())) }
         }
         $results = @(& "$scriptRoot\Upload files.ps1" $task '[pscustomobject]@{ Id="uploaded"; WebUrl="https://example.com/report" }')

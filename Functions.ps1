@@ -650,7 +650,7 @@ function ConvertTo-UploadConfigurationHC {
         }
         if ($task.SharePoint -isnot [pscustomobject]) { throw "$prefix.SharePoint is required." }
         foreach ($property in $task.SharePoint.PSObject.Properties.Name) {
-            if ($property -notin '?', 'SiteUrl', 'DocumentLibraryName', 'FolderPath', 'ClientId', 'TenantId', 'CertificateThumbprint', 'MaxRetries', 'ChunkSizeMB', 'Overwrite') { throw "Unsupported property '$prefix.SharePoint.$property'." }
+            if ($property -notin '?', 'SiteUrl', 'DocumentLibraryName', 'ClientId', 'TenantId', 'CertificateThumbprint', 'MaxRetries', 'ChunkSizeMB', 'Overwrite') { throw "Unsupported property '$prefix.SharePoint.$property'." }
         }
         if ($task.SharePoint.PSObject.Properties.Name -contains 'Overwrite' -and $task.SharePoint.Overwrite -isnot [bool]) {
             throw "$prefix.SharePoint.Overwrite must be true or false."
@@ -662,7 +662,6 @@ function ConvertTo-UploadConfigurationHC {
         if (-not [Uri]::TryCreate($task.SharePoint.SiteUrl, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.Query -or $uri.Fragment) {
             throw "$prefix.SharePoint.SiteUrl must be an HTTPS site URL without a query or fragment."
         }
-        if ($task.SharePoint.FolderPath -match '(^|[\\/])\.{1,2}([\\/]|$)') { throw "$prefix.SharePoint.FolderPath cannot contain '.' or '..' segments." }
         foreach ($property in 'MaxRetries', 'ChunkSizeMB') {
             $value = $task.SharePoint.$property
             $maximum = if ($property -eq 'ChunkSizeMB') { 60 } else { [int]::MaxValue }
@@ -692,15 +691,29 @@ function ConvertTo-UploadConfigurationHC {
             $sourceProperty = "$prefix.Upload.$($selection.Kind)"
             $uploadType = if ($selection.Kind -eq 'Files') { 'File' } else { 'Folder' }
             $sharePointFileName = $null
-            if ($entry -is [string]) { $path = $entry; $name = '' }
-            elseif ($entry -is [pscustomobject] -and $entry.Path -is [string]) {
+            if ($entry -is [pscustomobject]) {
                 foreach ($property in $entry.PSObject.Properties.Name) {
-                    if ($property -notin '?', 'Name', 'Path' -and -not ($uploadType -eq 'File' -and $property -eq 'SharePointFileName')) {
+                    if ($property -notin '?', 'Name', 'Source', 'Destination' -and -not ($uploadType -eq 'File' -and $property -eq 'SharePointFileName')) {
                         throw "Unsupported property '$sourceProperty.$property'."
                     }
                 }
                 if ($entry.PSObject.Properties.Name -contains 'Name' -and $entry.Name -isnot [string]) {
                     throw "$sourceProperty entry Name must be a string."
+                }
+                if ($entry.Source -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.Source)) {
+                    throw "$sourceProperty.Source must be a nonempty path string."
+                }
+                if ($entry.PSObject.Properties.Name -notcontains 'Destination') {
+                    throw "$sourceProperty.Destination is required; use null or an empty string for the library root."
+                }
+                if ($null -ne $entry.Destination -and $entry.Destination -isnot [string]) {
+                    throw "$sourceProperty.Destination must be a string or null; use null or an empty string for the library root."
+                }
+                if ($entry.Destination.Length -and [string]::IsNullOrWhiteSpace($entry.Destination)) {
+                    throw "$sourceProperty.Destination cannot contain only whitespace; use an empty string for the library root."
+                }
+                if ($entry.Destination -match '(^|[\\/])\.{1,2}([\\/]|$)') {
+                    throw "$sourceProperty.Destination cannot contain '.' or '..' segments."
                 }
                 if ($entry.PSObject.Properties.Name -contains 'SharePointFileName') {
                     $sharePointFileName = $entry.SharePointFileName
@@ -713,10 +726,9 @@ function ConvertTo-UploadConfigurationHC {
                         throw "$sourceProperty.SharePointFileName must be null, blank, or a filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace."
                     }
                 }
-                $path = $entry.Path; $name = $entry.Name
+                $path = $entry.Source; $name = $entry.Name
             }
-            else { throw "$sourceProperty entries must be strings or objects with Path and optional Name." }
-            if ([string]::IsNullOrWhiteSpace($path)) { throw "$sourceProperty requires nonempty paths." }
+            else { throw "$sourceProperty entries must be objects with Source and Destination, and optional Name." }
             $path = (Get-StringValueHC $path).Replace('/', '\')
             if ($path -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)' -or $path -match '[*?]') {
                 throw "$sourceProperty requires absolute local or UNC paths without wildcards."
@@ -741,7 +753,7 @@ function ConvertTo-UploadConfigurationHC {
             }
             $prepared.Add([pscustomobject]@{
                     TaskIndex = $taskIndex; ComputerName = $computer; Target = $target; Name = $name
-                    Path = $path; UploadType = $uploadType; Recurse = [bool]($uploadType -eq 'Folder' -and $task.Recurse); SharePoint = $task.SharePoint
+                    Path = $path; Destination = $entry.Destination; UploadType = $uploadType; Recurse = [bool]($uploadType -eq 'Folder' -and $task.Recurse); SharePoint = $task.SharePoint
                     SharePointFileName = $sharePointFileName
                     Exclude = [pscustomobject]$pathExclusions
                     AfterUpload = [pscustomobject]@{ RemoveFile = [bool]$after.RemoveFile; CopyToFolder = $copyFolder }
@@ -842,7 +854,7 @@ function Get-TaskDescriptionHC {
     else { 'Upload files' }
     if ($Task.UploadType -eq 'Folder' -and $Task.Recurse) { $description += ', including subfolders' }
     if ($Task.SharePoint.SiteUrl) {
-        $destination = (@($Task.SharePoint.SiteUrl.TrimEnd('/'), $Task.SharePoint.DocumentLibraryName, $Task.SharePoint.FolderPath) | Where-Object { $_ }) -join '/'
+        $destination = (@($Task.SharePoint.SiteUrl.TrimEnd('/'), $Task.SharePoint.DocumentLibraryName, $Task.Destination) | Where-Object { $_ }) -join '/'
         $description += " to $destination"
     }
     if ($Task.SharePointFileName) { $description += " as '$($Task.SharePointFileName)'" }

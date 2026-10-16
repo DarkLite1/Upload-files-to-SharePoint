@@ -54,13 +54,13 @@ For your first run, keep only the first example task and change:
 | Setting | What to enter |
 | --- | --- |
 | `Tasks[].ComputerName` | `localhost` for local files/folders, or `null` for a network share. |
-| `Tasks[].Upload.Folders` | Folders whose contents should be uploaded. Entries can be path strings or objects with `Name` and `Path`. |
-| `Tasks[].Upload.Files` | Specific files to upload. Object entries can add `SharePointFileName` to use a different name on SharePoint. Other files in their parent folders are not uploaded. |
+| `Tasks[].Upload.Folders` | Folders whose contents should be uploaded. Every entry requires `Source` and `Destination`, with optional `Name` for reporting. |
+| `Tasks[].Upload.Files` | Specific files to upload. Every entry requires `Source` and `Destination`, with optional `Name` and `SharePointFileName`. Other files in their parent folders are not uploaded. |
 | `Tasks[].Recurse` | Required for folder selections: `true` includes subfolders and preserves their relative paths; `false` selects only direct contents. Optional and unused for file-only tasks. |
 | `Tasks[].Exclude.Attributes` | Optional array: `["Hidden"]`, `["System"]`, or `["Hidden", "System"]` to skip those files and folder trees. Use `[]` or omit the setting to include them. |
 | `Tasks[].Exclude.Folders` | Optional array of absolute subfolder paths to skip with all their contents. |
 | `Tasks[].Exclude.Files` | Optional array of absolute file paths to skip. |
-| `Tasks[].SharePoint` | Your site URL, library name, optional destination `FolderPath`, client ID, tenant ID, and certificate thumbprint. |
+| `Tasks[].SharePoint` | Shared site URL, library name, client ID, tenant ID, and certificate thumbprint. Destinations are specified on individual source entries. |
 | `Tasks[].SharePoint.Overwrite` | `false` (default) reports an error if the destination file exists. Set to `true` only when you want to replace existing SharePoint files. |
 | `Settings.ScriptName` | A name for your reports and log files. |
 | `Settings.SaveLogFiles.Where.Folder` | A dedicated log folder outside your source folders, or `null` to disable log files. |
@@ -71,14 +71,32 @@ Use `Upload.Folders`, `Upload.Files`, or both in each task. For example:
 
 ```json
 "Upload": {
-  "Folders": ["C:\\Exports\\Reports"],
-  "Files": [{ "Name": "Manifest", "Path": "C:\\Exports\\manifest.csv" }]
+  "Folders": [{ "Source": "C:\\Exports\\Reports", "Destination": "Reports" }],
+  "Files": [{ "Name": "Manifest", "Source": "C:\\Exports\\manifest.csv", "Destination": null }]
 }
 ```
 
-Either list may be omitted or set to `[]`, but at least one source is required. Paths must be absolute local or UNC paths, without wildcards; `ENV:` paths resolve on the script host. `Name` is an optional report label, not a destination filename. The former top-level `Tasks[].Folders` setting is no longer accepted.
+Either list may be omitted or set to `[]`, but at least one source is required. Every entry must be an object with `Source` and `Destination`. `Source` must be a nonempty absolute local or UNC path, without wildcards; `ENV:` sources resolve on the script host. `Name` is an optional report label, not a destination filename.
 
-Folder contents go into `SharePoint.FolderPath` without the selected root folder's name; `Recurse: true` preserves subfolders. Explicit files go directly into `SharePoint.FolderPath` by filename. Do not select the same file twice, overlapping folders, or explicit files inside selected folders, even when `Recurse` is false.
+Folder contents go into the effective destination folder without the selected root folder's name; `Recurse: true` preserves subfolders. Explicit files go directly into that destination by filename. Do not select the same file twice, overlapping folders, or explicit files inside selected folders, even when `Recurse` is false or destinations differ.
+
+To use different destination folders within the same site and library, specify each entry's `Destination`:
+
+```json
+"Upload": {
+  "Folders": [
+    { "Source": "C:\\Exports\\Auxiliaire", "Destination": "Reports/Auxiliaire" },
+    { "Source": "C:\\Exports\\Surface", "Destination": "Reports/Surface" }
+  ],
+  "Files": [
+    { "Source": "C:\\Exports\\manifest.csv", "Destination": "Reports/Manifests" }
+  ]
+}
+```
+
+`Destination` is a required property specifying a folder path relative to the document library. Missing folders are created; `null` or `""` explicitly selects the library root. Omitted properties, whitespace-only values and `.` or `..` path segments are rejected. `Destination` affects uploads and reporting, not local source paths or archive layout. For `Upload.Files`, it remains a folder, not a filename; use `SharePointFileName` to change the uploaded filename.
+
+**Configuration migration:** `SharePoint.FolderPath` has been removed. Rename each entry's `Path` to `Source` and `FolderPath` to `Destination`. If an entry previously inherited the shared destination, copy that value into its `Destination` before removing the shared property. Convert string-only selections into objects and specify a destination explicitly. Old properties and string-only entries are rejected, not silently redirected to the library root. The former top-level `Tasks[].Folders` setting is also unsupported.
 
 To give a selected file a different name on SharePoint, use an object entry:
 
@@ -86,7 +104,8 @@ To give a selected file a different name on SharePoint, use an object entry:
 "Upload": {
   "Files": [
     {
-      "Path": "C:\\Exports\\manifest.csv",
+      "Source": "C:\\Exports\\manifest.csv",
+      "Destination": "Reports/Manifests",
       "SharePointFileName": "Latest manifest.csv"
     }
   ]

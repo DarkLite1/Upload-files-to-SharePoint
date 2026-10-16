@@ -5,7 +5,7 @@
       "?": "Upload files, preserving subfolders. Keep the source files.",
       "ComputerName": "localhost",
       "Upload": {
-        "Folders": [{ "Name": "Reports", "Path": "C:\\Exports\\Reports" }],
+        "Folders": [{ "Name": "Reports", "Source": "C:\\Exports\\Reports", "Destination": "Reports" }],
         "Files": []
       },
       "Recurse": true,
@@ -17,7 +17,6 @@
       "SharePoint": {
         "SiteUrl": "https://contoso.sharepoint.com/sites/IT",
         "DocumentLibraryName": "Documents",
-        "FolderPath": "Reports",
         "Overwrite": false,
         "ClientId": "ENV:AZURE_CLIENT_ID",
         "TenantId": "ENV:AZURE_TENANT_ID",
@@ -37,7 +36,8 @@
         "Folders": [],
         "Files": [
           {
-            "Path": "\\\\contoso\\exports\\Invoices\\invoice.csv",
+            "Source": "\\\\contoso\\exports\\Invoices\\invoice.csv",
+            "Destination": "Invoices/Published",
             "SharePointFileName": "Latest invoice.csv"
           }
         ]
@@ -46,7 +46,6 @@
       "SharePoint": {
         "SiteUrl": "https://contoso.sharepoint.com/sites/Finance",
         "DocumentLibraryName": "Documents",
-        "FolderPath": "Invoices",
         "Overwrite": false,
         "ClientId": "ENV:AZURE_CLIENT_ID",
         "TenantId": "ENV:AZURE_TENANT_ID",
@@ -95,9 +94,11 @@
     "Tasks": {
       "ComputerName": "Use localhost for local paths, a remote computer name for paths on that computer, or null for UNC paths processed by the script host.",
       "Upload": {
-        "?": "Required object. Select at least one source across Folders and Files. Either list may be omitted or empty; null and scalar lists are invalid. Both lists accept absolute local or UNC paths, or objects with Path and optional string Name for reporting. Paths are literal; wildcards are not supported. ENV: values resolve on the script host. Duplicate and overlapping sources on the same computer are rejected, including explicit files inside selected folders.",
-        "Folders": "Upload the contents of these folders. Recurse controls subfolder traversal and relative paths. Each selected folder is one job.",
-        "Files": "Upload only these specific files, without enumerating their parent folders. Each file is one job. String entries keep their original filename. Object entries accept Path, optional Name (report label), and optional SharePointFileName (destination filename, including its desired extension). SharePointFileName affects only the upload inside SharePoint.FolderPath; local and CopyToFolder filenames stay unchanged. Omit it or set it to null, an empty string, or whitespace only to keep the original name. A nonblank value must be a literal filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace. SharePoint.Overwrite applies to the resulting destination name. Folder entries do not support this option."
+        "?": "Required object. Select at least one source across Folders and Files. Either list may be omitted or empty; null and scalar lists are invalid. Every entry must be an object with Source and Destination, plus optional string Name for reporting. String-only entries and the former Path, FolderPath and SharePoint.FolderPath properties are not supported. Duplicate and overlapping sources on the same computer are rejected, including explicit files inside selected folders.",
+        "Folders": "Upload the contents of each Source folder into its Destination, without the source root folder name. Recurse controls subfolder traversal and relative paths. Each selected folder is one job.",
+        "Source": "Required on every entry in Folders and Files. Nonempty absolute local or UNC path. Paths are literal; wildcards are not supported. ENV: values resolve on the script host.",
+        "Destination": "Required property on every entry in Folders and Files. A string specifies a folder relative to the SharePoint document library; missing folders are created. Null or an empty string selects the library root. Omitted properties, whitespace-only values and '.' or '..' segments are invalid. Does not change local or archive paths.",
+        "Files": "Upload only each Source file into its Destination folder, without enumerating its parent folder. Each file is one job. Entries may also specify Name (report label) and SharePointFileName (destination filename, including its desired extension). SharePointFileName affects only the upload; local and CopyToFolder filenames stay unchanged. Omit it or set it to null, an empty string, or whitespace only to keep the original name. A nonblank value must be a literal filename of at most 255 characters, without paths, invalid SharePoint characters, or leading/trailing periods or whitespace. SharePoint.Overwrite applies to the resulting destination name. Folder entries do not support SharePointFileName."
       },
       "Recurse": "Boolean required when Upload.Folders is nonempty; optional for file-only tasks. Applies only to Upload.Folders. true preserves relative subfolders in SharePoint and in CopyToFolder; false uploads only files directly in each selected folder. Hidden/system files are included unless excluded; directory links are not followed.",
       "Exclude": {
@@ -109,7 +110,6 @@
       "SharePoint": {
         "SiteUrl": "Required HTTPS site URL, not a library or sharing URL.",
         "DocumentLibraryName": "Required library display name. Documents and Shared Documents are accepted aliases.",
-        "FolderPath": "Optional folder inside the library. Missing folders are created. Empty means library root. Each source folder's contents go here, without its root folder name. Explicitly selected files go here using SharePointFileName when configured, otherwise their original filename, without their local parent folder path.",
         "Overwrite": "Optional Boolean, default false. true replaces existing SharePoint files. false or omission reports an error if a destination file already exists, and leaves the source untouched. Applies to SharePoint only; existing archive files are never overwritten.",
         "ClientId": "Required app registration client ID, or ENV:VARIABLE_NAME.",
         "TenantId": "Required tenant ID, or ENV:VARIABLE_NAME.",
