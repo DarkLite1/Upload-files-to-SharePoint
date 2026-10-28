@@ -1197,4 +1197,186 @@ Describe 'Upload reporting' {
         $errors.Count | Should -Be 1
         $errors[0].Message | Should -BeLike '*Workbook is locked*'
     }
+
+    Context 'Daily Excel log' {
+        BeforeAll {
+            Import-Module ImportExcel
+            function New-DailyRow {
+                param ([string]$Source, [string]$ErrorMessage = '')
+                [pscustomobject]@{
+                    ComputerName = 'localhost'; Name = 'Reports'; Source = $Source; Destination = 'Reports'
+                    Uploaded = -not $ErrorMessage; CopiedTo = ''; Removed = $false; Error = $ErrorMessage
+                }
+            }
+            function Get-DayLogPath {
+                param ([string]$Folder, [datetime]$Day, [string]$Configuration = 'Test')
+                Join-Path $Folder ('{0} - {1} ({2}) - Log.xlsx' -f $Day.ToString('yyyy_MM_dd'), $settings.ScriptName, $Configuration)
+            }
+        }
+        BeforeEach {
+            $settings.SaveLogFiles.Where.Folder = Join-Path $TestDrive ([guid]::NewGuid())
+            $settings.SaveLogFiles.DeleteLogsAfterDays = 0
+            $settings.SendMail.When = 'Never'
+            $day = (Get-Date).Date
+        }
+
+        It 'names the Excel log after the day the run started, without a time' {
+            Send-UploadReportHC $settings @($row) $systemErrors $day.AddHours(9).AddMinutes(15) 'Test'
+            $systemErrors.Count | Should -Be 0
+            $excel = @(Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx')
+            $excel.Count | Should -Be 1
+            $excel[0].Name | Should -Be ('{0} - {1} (Test) - Log.xlsx' -f $day.ToString('yyyy_MM_dd'), $settings.ScriptName)
+        }
+
+        It 'appends later runs on the same day to the same Excel file and table' {
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\first.txt') $systemErrors $day.AddHours(9) 'Test'
+            Send-UploadReportHC $settings @(
+                New-DailyRow 'C:\Exports\second.txt'
+                New-DailyRow 'C:\Exports\third.txt'
+            ) $systemErrors $day.AddHours(10) 'Test'
+            $systemErrors.Count | Should -Be 0
+            @(Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx').Count | Should -Be 1
+            $path = Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day
+            $overview = @(Import-Excel -Path $path -WorksheetName 'Overview')
+            $overview.Source | Should -Be @('C:\Exports\first.txt', 'C:\Exports\second.txt', 'C:\Exports\third.txt')
+            $package = Open-ExcelPackage -Path $path
+            try {
+                $sheet = $package.Workbook.Worksheets['Overview']
+                @($sheet.Tables).Count | Should -Be 1
+                $sheet.Tables['Overview'].Address.End.Row | Should -Be 4
+                $sheet.Cells[1, 1].Value | Should -Be 'DateTime'
+                $sheet.Cells[2, 1].Value | Should -Not -Be 'DateTime'
+                $sheet.Cells[3, 1].Value | Should -Not -Be 'DateTime'
+            }
+            finally { $package.Dispose() }
+        }
+
+        It 'creates the Errors sheet on the first failing run of the day and appends later errors' {
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\ok.txt') $systemErrors $day.AddHours(8) 'Test'
+            $path = Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day
+            $package = Open-ExcelPackage -Path $path
+            try { $package.Workbook.Worksheets.Name | Should -Not -Contain 'Errors' }
+            finally { $package.Dispose() }
+
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\bad1.txt' 'Conflict 1') $systemErrors $day.AddHours(9) 'Test'
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\bad2.txt' 'Conflict 2') $systemErrors $day.AddHours(10) 'Test'
+            $systemErrors.Count | Should -Be 0
+            @(Import-Excel -Path $path -WorksheetName 'Overview').Count | Should -Be 3
+            $errorRows = @(Import-Excel -Path $path -WorksheetName 'Errors')
+            $errorRows.Error | Should -Be @('Conflict 1', 'Conflict 2')
+            $package = Open-ExcelPackage -Path $path
+            try { $package.Workbook.Worksheets['Errors'].Tables['Errors'].Address.End.Row | Should -Be 3 }
+            finally { $package.Dispose() }
+        }
+
+        It 'starts a new Excel file on a new day' {
+            $yesterday = $day.AddDays(-1)
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\yesterday.txt') $systemErrors $yesterday.AddHours(9) 'Test'
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\today.txt') $systemErrors $day.AddHours(9) 'Test'
+            @(Get-ChildItem $settings.SaveLogFiles.Where.Folder -Filter '*.xlsx').Count | Should -Be 2
+            (Import-Excel (Get-DayLogPath $settings.SaveLogFiles.Where.Folder $yesterday)).Source | Should -Be 'C:\Exports\yesterday.txt'
+            (Import-Excel (Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day)).Source | Should -Be 'C:\Exports\today.txt'
+        }
+
+        It 'writes a run that started before midnight to the day it started' {
+            $lateStart = $day.AddDays(-1).AddHours(23).AddMinutes(59)
+            Send-UploadReportHC $settings @($row) $systemErrors $lateStart 'Test'
+            Test-Path -LiteralPath (Get-DayLogPath $settings.SaveLogFiles.Where.Folder $lateStart) | Should -BeTrue
+            Test-Path -LiteralPath (Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day) | Should -BeFalse
+        }
+
+        It 'keeps a separate daily file for each configuration' {
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\a.txt') $systemErrors $day.AddHours(9) 'Test'
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\b.txt') $systemErrors $day.AddHours(9) 'Other'
+            (Import-Excel (Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day 'Test')).Source | Should -Be 'C:\Exports\a.txt'
+            (Import-Excel (Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day 'Other')).Source | Should -Be 'C:\Exports\b.txt'
+        }
+
+        It 'keeps email HTML and system-errors JSON per run' {
+            $settings.SendMail.When = 'Always'
+            $systemErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = 'First run failure' })
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\first.txt') $systemErrors $day.AddHours(9) 'Test'
+            $secondRunErrors = [Collections.Generic.List[object]]::new()
+            $secondRunErrors.Add([pscustomobject]@{ DateTime = Get-Date; Message = 'Second run failure' })
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\second.txt') $secondRunErrors $day.AddHours(10) 'Test'
+            $folder = $settings.SaveLogFiles.Where.Folder
+            @(Get-ChildItem $folder -Filter '*.xlsx').Count | Should -Be 1
+            $html = @(Get-ChildItem $folder -Filter '* - Mail.html')
+            $html.Count | Should -Be 2
+            $html.Name | ForEach-Object { $_ | Should -Match '^\d{4}_\d{2}_\d{2}_\d{6}_\d{3} - ' }
+            $json = @(Get-ChildItem $folder -Filter '* - System errors log.json' | Sort-Object Name)
+            $json.Count | Should -Be 2
+            (Get-Content -LiteralPath $json[0].FullName -Raw | ConvertFrom-Json).Message | Should -Be 'First run failure'
+            (Get-Content -LiteralPath $json[1].FullName -Raw | ConvertFrom-Json).Message | Should -Be 'Second run failure'
+        }
+
+        It 'attaches the full day file to the email after each run' {
+            $settings.SendMail.When = 'Always'
+            $script:dayLogPath = Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\first.txt') $systemErrors $day.AddHours(9) 'Test'
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\second.txt') $systemErrors $day.AddHours(10) 'Test'
+            Should -Invoke Send-MailKitMessageHC -Times 2 -Exactly -ParameterFilter {
+                @($Attachments).Count -eq 1 -and $Attachments[0] -eq $script:dayLogPath
+            }
+            @(Import-Excel $script:dayLogPath).Count | Should -Be 2
+        }
+
+        It 'attaches the existing day file even when the current run has no results' {
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\morning.txt') $systemErrors $day.AddHours(9) 'Test'
+            $settings.SendMail.When = 'Always'
+            $script:dayLogPath = Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day
+            $before = (Get-Item -LiteralPath $script:dayLogPath).LastWriteTimeUtc
+            Send-UploadReportHC $settings @() $systemErrors $day.AddHours(10) 'Test'
+            $systemErrors.Count | Should -Be 0
+            Should -Invoke Send-MailKitMessageHC -Times 1 -Exactly -ParameterFilter {
+                @($Attachments).Count -eq 1 -and $Attachments[0] -eq $script:dayLogPath -and $Subject -eq '0 uploaded, 0 errors'
+            }
+            (Get-Item -LiteralPath $script:dayLogPath).LastWriteTimeUtc | Should -Be $before
+            (Import-Excel $script:dayLogPath).Source | Should -Be 'C:\Exports\morning.txt'
+        }
+
+        It 'does not attach another day''s file when the current run has no results' {
+            Send-UploadReportHC $settings @($row) $systemErrors $day.AddDays(-1).AddHours(9) 'Test'
+            $settings.SendMail.When = 'Always'
+            Send-UploadReportHC $settings @() $systemErrors $day.AddHours(9) 'Test'
+            Should -Invoke Send-MailKitMessageHC -Times 1 -Exactly -ParameterFilter { -not $Attachments }
+        }
+
+        It 'removes old daily Excel logs but keeps recent and unrelated ones' {
+            $folder = New-Item -ItemType Directory $settings.SaveLogFiles.Where.Folder
+            $settings.SaveLogFiles.DeleteLogsAfterDays = 30
+            $oldDaily = '2020_01_01 - {0} (Test) - Log.xlsx' -f $settings.ScriptName
+            $recentDaily = '{0} - {1} (Test) - Log.xlsx' -f $day.AddDays(-2).ToString('yyyy_MM_dd'), $settings.ScriptName
+            $otherConfig = '2020_01_01 - {0} (Other) - Log.xlsx' -f $settings.ScriptName
+            $unrelated = '2020_01_01 - {0} (Test) - notes.xlsx' -f $settings.ScriptName
+            foreach ($name in $oldDaily, $otherConfig, $unrelated) {
+                (New-Item -ItemType File (Join-Path $folder $name)).LastWriteTime = (Get-Date).AddDays(-60)
+            }
+            (New-Item -ItemType File (Join-Path $folder $recentDaily)).LastWriteTime = (Get-Date).AddDays(-2)
+            Send-UploadReportHC $settings @() $systemErrors (Get-Date) 'Test'
+            $systemErrors.Count | Should -Be 0
+            Test-Path -LiteralPath (Join-Path $folder $oldDaily) | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $folder $recentDaily) | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $folder $otherConfig) | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $folder $unrelated) | Should -BeTrue
+        }
+
+        It 'keeps today''s file intact when it is rewritten after the retention cutoff' {
+            $settings.SaveLogFiles.DeleteLogsAfterDays = 1
+            $path = Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\first.txt') $systemErrors $day.AddMinutes(1) 'Test'
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\second.txt') $systemErrors $day.AddMinutes(2) 'Test'
+            @(Import-Excel $path).Source | Should -Be @('C:\Exports\first.txt', 'C:\Exports\second.txt')
+        }
+
+        It 'records a locked day file as a system error without losing earlier rows' {
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\first.txt') $systemErrors $day.AddHours(9) 'Test'
+            $path = Get-DayLogPath $settings.SaveLogFiles.Where.Folder $day
+            Mock Export-Excel { throw 'The process cannot access the file because it is being used by another process.' }
+            Send-UploadReportHC $settings @(New-DailyRow 'C:\Exports\second.txt') $systemErrors $day.AddHours(10) 'Test'
+            $systemErrors.Count | Should -Be 1
+            $systemErrors[0].Message | Should -BeLike '*Failed saving log files*being used by another process*'
+            (Import-Excel $path).Source | Should -Be 'C:\Exports\first.txt'
+        }
+    }
 }

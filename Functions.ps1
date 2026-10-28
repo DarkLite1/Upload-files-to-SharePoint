@@ -1077,6 +1077,7 @@ function Send-UploadReportHC {
     $uploadedCount = @($Results | Where-Object Uploaded).Count
     $itemErrorCount = @($Results | Where-Object Error).Count
     $baseLogName = $null
+    $dayLogName = $null
     $logFolder = $null
     $attachments = @()
     try {
@@ -1084,18 +1085,20 @@ function Send-UploadReportHC {
         if ($folder) {
             $logFolder = Get-LogFolderHC $folder
             $baseLogName = Join-Path $logFolder ('{0} - {1} ({2})' -f $Started.ToString('yyyy_MM_dd_HHmmss_fff'), $Settings.ScriptName, $ConfigurationName)
+            # One Excel log per day: runs on the same day append to the file named after the day the run started
+            $dayLogName = Join-Path $logFolder ('{0} - {1} ({2})' -f $Started.ToString('yyyy_MM_dd'), $Settings.ScriptName, $ConfigurationName)
             $days = $Settings.SaveLogFiles.DeleteLogsAfterDays
             if ($days -gt 0) {
                 $cutoff = (Get-Date).AddDays(-$days)
                 Get-ChildItem -LiteralPath $logFolder -File | Where-Object {
-                    $_.Name -match '^\d{4}_\d{2}_\d{2}_\d{6}_\d{3} - ' -and
+                    $_.Name -match '^\d{4}_\d{2}_\d{2}(_\d{6}_\d{3})? - ' -and
                     $_.Name -match ' - (Log\.xlsx|Log\.json|System errors log\.json|Mail\.html)$' -and
                     $_.Name.Contains(" - $($Settings.ScriptName) ($ConfigurationName) - ") -and
                     $_.LastWriteTime -lt $cutoff
                 } | Remove-Item -Force -ErrorAction Stop
             }
+            $excelPath = "$dayLogName - Log.xlsx"
             if ($Results.Count) {
-                $excelPath = "$baseLogName - Log.xlsx"
                 $overviewColumns = @(
                     'DateTime', 'ComputerName', 'TaskIndex', 'Type', 'Name', 'FileName', 'FullName',
                     'CreationTime', 'LastWriteTime', 'Length', 'Action', 'Uploaded', 'CopiedTo', 'Removed',
@@ -1108,7 +1111,7 @@ function Send-UploadReportHC {
                 )
                 $excelParams = @{
                     Path = $excelPath; AutoSize = $true; FreezeTopRow = $true; BoldTopRow = $true
-                    NoNumberConversion = '*'; ErrorAction = 'Stop'
+                    NoNumberConversion = '*'; Append = $true; ErrorAction = 'Stop'
                 }
                 $Results | Select-Object -Property $overviewColumns |
                     Export-Excel @excelParams -WorksheetName 'Overview' -TableName 'Overview'
@@ -1117,6 +1120,9 @@ function Send-UploadReportHC {
                     $fileErrors | Select-Object -Property $errorColumns |
                         Export-Excel @excelParams -WorksheetName 'Errors' -TableName 'Errors'
                 }
+            }
+            # Attach the whole day's log, including rows from earlier runs today
+            if (Test-Path -LiteralPath $excelPath -PathType Leaf) {
                 $attachments += $excelPath
             }
         }
